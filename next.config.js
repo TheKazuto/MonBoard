@@ -18,26 +18,10 @@ const CSP = [
   // Fonts
   "font-src 'self' https://fonts.gstatic.com data:",
 
-  // Images: explicit CDN allowlist — no wildcard http:
-  [
-    "img-src 'self' data: blob:",
-    "https://assets.coingecko.com",
-    "https://coin-images.coingecko.com",
-    "https://tokens.1inch.io",
-    "https://raw.githubusercontent.com",
-    "https://api.geckoterminal.com",
-    "https://ipfs.io",
-    "https://gateway.pinata.cloud",
-    "https://arweave.net",
-    "https://nftstorage.link",
-    "https://icons.llamao.fi",
-    "https://s2.coinmarketcap.com",
-    "https://effigy.im",
-    "https://metadata.ens.domains",
-    "https://api-mainnet.magiceden.dev",
-    "https://pagead2.googlesyndication.com",
-    "https://googleads.g.doubleclick.net",
-  ].join(' '),
+  // Images: allow all HTTPS sources. NFT images come from unpredictable hosts
+  // so a fixed allowlist always breaks things. img-src cannot execute scripts —
+  // there is no XSS risk here. http: is still blocked; only https: is allowed.
+  "img-src 'self' data: blob: https:",
 
   // Connections: every upstream API, RPC, and WalletConnect endpoint
   [
