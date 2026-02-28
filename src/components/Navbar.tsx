@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, Zap, ArrowLeftRight, Shield } from 'lucide-react'
+import { LayoutDashboard, Wallet, BarChart3, History, User, Menu, X, Zap, ArrowLeftRight, Shield, TrendingUp } from 'lucide-react'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 
 // Stable style object for the logo wordmark — avoids creating a new object per render
@@ -13,7 +13,8 @@ const navLinks = [
   { href: '/',             label: 'Dashboard',      icon: LayoutDashboard },
   { href: '/portfolio',    label: 'Portfolio',      icon: Wallet },
   { href: '/defi',         label: 'DeFi Positions', icon: BarChart3 },
-  { href: '/swap',         label: 'Swap/Bridge',           icon: ArrowLeftRight },
+  { href: '/best-aprs',    label: 'Best APRs',      icon: TrendingUp },
+  { href: '/swap',         label: 'Swap/Bridge',    icon: ArrowLeftRight },
   { href: '/security',     label: 'Security',       icon: Shield },
   { href: '/transactions', label: 'Transactions',   icon: History },
   { href: '/account',      label: 'Account',        icon: User },
