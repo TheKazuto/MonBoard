@@ -443,7 +443,7 @@ async function fetchRenzo(): Promise<AprEntry[]> {
 
 // ─── UNISWAP V3 + V4 — top pools via Uniswap GraphQL ─────────────────────────
 // Uses GraphQL aliases to fetch V3 and V4 in a single request
-// If V4 query fails (not yet supported), the V3 alias still returns data
+// V3Pool uses `address`, V4Pool uses `poolId` (no `address` field)
 function parseUniPools(pools: any[], version: string): AprEntry[] {
   const out: AprEntry[] = []
   for (const p of pools) {
@@ -458,8 +458,9 @@ function parseUniPools(pools: any[], version: string): AprEntry[] {
     const t1 = p.token1?.symbol ?? '?'
     const tokens = [t0, t1]
     const feeLabel = fee === 100 ? '0.01%' : fee === 500 ? '0.05%' : fee === 3000 ? '0.3%' : fee === 10000 ? '1%' : `${fee/10000}%`
+    const poolRef = p.address ?? p.poolId ?? ''
     out.push({
-      protocol: `Uniswap ${version}`, logo: '🦄', url: `https://app.uniswap.org/explore/pools/monad/${p.address}`,
+      protocol: `Uniswap ${version}`, logo: '🦄', url: `https://app.uniswap.org/explore/pools/monad/${poolRef}`,
       tokens, label: `${t0}/${t1} ${feeLabel}`,
       apr, type: 'pool', isStable: allStable(tokens),
     })
@@ -472,41 +473,35 @@ async function fetchUniswap(): Promise<AprEntry[]> {
   // APR = (volume_24h × feeTier_pct) / TVL × 365 × 100
   const GQL  = 'https://interface.gateway.uniswap.org/v1/graphql'
   const HDRS = { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' }
-  const FIELDS = `address feeTier
+  const V3_FIELDS = `address feeTier
+      token0 { symbol }
+      token1 { symbol }
+      totalLiquidity { value }
+      cumulativeVolume(duration: DAY) { value }`
+  const V4_FIELDS = `poolId feeTier
       token0 { symbol }
       token1 { symbol }
       totalLiquidity { value }
       cumulativeVolume(duration: DAY) { value }`
 
   try {
-    // Try V3 + V4 combined first
-    const combined = `{
-      v3: topV3Pools(chain: MONAD, first: 30) { ${FIELDS} }
-      v4: topV4Pools(chain: MONAD, first: 30) { ${FIELDS} }
-    }`
-    const res = await fetch(GQL, {
-      method: 'POST', headers: HDRS,
-      body: JSON.stringify({ query: combined }),
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    const data = await res.json()
+    // V3 + V4 in parallel with separate requests (different field sets)
+    const [res3, res4] = await Promise.all([
+      fetch(GQL, {
+        method: 'POST', headers: HDRS,
+        body: JSON.stringify({ query: `{ topV3Pools(chain: MONAD, first: 30) { ${V3_FIELDS} } }` }),
+        signal: AbortSignal.timeout(10_000), cache: 'no-store',
+      }).then(r => r.json()).catch(() => null),
+      fetch(GQL, {
+        method: 'POST', headers: HDRS,
+        body: JSON.stringify({ query: `{ topV4Pools(chain: MONAD, first: 30) { ${V4_FIELDS} } }` }),
+        signal: AbortSignal.timeout(10_000), cache: 'no-store',
+      }).then(r => r.json()).catch(() => null),
+    ])
 
-    // If no errors, parse both
-    if (!data.errors) {
-      const v3 = parseUniPools(data?.data?.v3 ?? [], 'V3')
-      const v4 = parseUniPools(data?.data?.v4 ?? [], 'V4')
-      return [...v3, ...v4].sort((a, b) => b.apr - a.apr)
-    }
-
-    // If combined failed (e.g. topV4Pools not in schema), fallback to V3 only
-    const fallback = `{ topV3Pools(chain: MONAD, first: 30) { ${FIELDS} } }`
-    const res2 = await fetch(GQL, {
-      method: 'POST', headers: HDRS,
-      body: JSON.stringify({ query: fallback }),
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    const data2 = await res2.json()
-    return parseUniPools(data2?.data?.topV3Pools ?? [], 'V3')
+    const v3 = parseUniPools(res3?.data?.topV3Pools ?? [], 'V3')
+    const v4 = parseUniPools(res4?.data?.topV4Pools ?? [], 'V4')
+    return [...v3, ...v4].sort((a, b) => b.apr - a.apr)
   } catch { return [] }
 }
 
