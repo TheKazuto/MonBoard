@@ -223,9 +223,35 @@ export async function GET(req: Request) {
   const apis       = deduped.filter(e => e.kind !== 'contract-address').sort((a, b) => a.url.localeCompare(b.url))
   const contracts  = deduped.filter(e => e.kind === 'contract-address')
 
+  // Filter noise: skip RPC nodes, block explorers, and unrelated infra
+  const NOISE_DOMAINS = [
+    'etherscan.io', 'arbiscan.io', 'bscscan.com', 'polygonscan.com', 'snowtrace.io',
+    'ftmscan.com', 'celoscan.io', 'basescan.org', 'fraxscan.com', 'gnosisscan.io',
+    'moonscan.io', 'aurorascan.dev', 'mantlescan.xyz', 'routescan.io', 'oklink.com',
+    'drpc.org', 'thirdweb.com', 'blastapi.io', 'nodies.app', 'ankr.com',
+    'arbitrum.io', 'avax.network', 'polygon.technology', 'zksync.io', 'moonbeam.network',
+    'plume.org', 'taiko.xyz', 'inkonchain.com', 'megaeth.com', 'tac.build', 'corn-rpc.com',
+    'xdcrpc.com', 'xinfin.network', 'gnosischain.com', 'expchain.ai', 'stratareth',
+    'era.zksync.io', '1rpc.io', 'kavascan.com', 'freshping.io', 'governance.aave.com',
+  ]
+  const NOISE_PATTERNS = ['/rpc', '.rpc.', 'rpc.', '/etherscan', 'gasstation', 'blockexplorer']
+
+  function isNoise(url: string): boolean {
+    try {
+      const u = new URL(url.startsWith('/') ? targetUrl.origin + url : url)
+      if (NOISE_DOMAINS.some(d => u.hostname.endsWith(d))) return true
+      if (NOISE_PATTERNS.some(p => url.includes(p))) return true
+      // Skip pure RPC endpoints (no path beyond /rpc or empty)
+      if (u.pathname === '/rpc' || u.pathname === '' || u.pathname === '/') return true
+    } catch { /* keep */ }
+    return false
+  }
+
+  const relevantApis = apis.filter(e => !isNoise(e.url))
+
   // Group APIs by base domain for readability
   const byDomain: Record<string, DiscoveredEndpoint[]> = {}
-  for (const e of apis) {
+  for (const e of relevantApis) {
     let domain: string
     try { domain = new URL(e.url.startsWith('/') ? targetUrl.origin + e.url : e.url).hostname } catch { domain = 'relative' }
     if (!byDomain[domain]) byDomain[domain] = []
@@ -236,7 +262,8 @@ export async function GET(req: Request) {
     scanned: targetUrl.href,
     summary: {
       bundlesScanned: appBundles.length,
-      totalEndpoints: apis.length,
+      totalEndpointsRaw: apis.length,
+      totalEndpointsFiltered: relevantApis.length,
       contractAddresses: contracts.length,
     },
     apiEndpoints: byDomain,

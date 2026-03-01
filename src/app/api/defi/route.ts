@@ -364,15 +364,27 @@ async function fetchCurve(user: string): Promise<any[]> {
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
 
-  // Step 1: Fetch all pools from both active pool types in parallel
+  // Step 1: Fetch pool lists + DeFiLlama APYs in parallel
+  // DeFiLlama is the same APY source the Curve UI uses (confirmed via bundle scan)
   const poolTypes = ['factory-twocrypto', 'factory-stable-ng']
-  const poolFetches = await Promise.all(
-    poolTypes.map(t =>
+  const [llamaRes, ...poolFetches] = await Promise.all([
+    fetch('https://yields.llama.fi/pools', { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null).catch(() => null),
+    ...poolTypes.map(t =>
       fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
         .then(r => r.ok ? r.json() : null)
         .catch(() => null)
-    )
-  )
+    ),
+  ])
+
+  // Build DeFiLlama APY lookup by pool address
+  const llamaByAddress: Record<string, number> = {}
+  for (const lp of (llamaRes?.data ?? [])) {
+    if (lp.project === 'curve' && lp.chain?.toLowerCase() === 'monad') {
+      const addr = (lp.pool ?? '').toLowerCase().split('-')[0]
+      if (addr) llamaByAddress[addr] = Number(lp.apy ?? lp.apyBase ?? 0)
+    }
+  }
 
   // Flatten all pools into one list with metadata
   const allPools: any[] = []
@@ -416,17 +428,17 @@ async function fetchCurve(user: string): Promise<any[]> {
 
     if (netValueUSD < 0.01) continue
 
-    // Calculate APR from virtualPrice delta (stored in pool object from getPools response)
-    // virtualPrice is in 1e18; we'll compute APR in the second pass with block data
     const coins = pool.coins?.map((c: any) => c.symbol) ?? []
     const poolId = pool.id ?? pool.address
+    // Use DeFiLlama APY if available (same source as Curve UI), else 0
+    const apy = llamaByAddress[pool.address?.toLowerCase()] ?? 0
     positions.push({
       protocol: 'Curve', type: 'liquidity', logo: '🌊',
       url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`, chain: 'Monad',
       label: pool.name ?? coins.join('/'),
       tokens: coins,
       amountUSD: netValueUSD,
-      apy: 0, // APR calculated via virtualPrice in best-aprs; 0 here is safe fallback
+      apy,
       netValueUSD,
       inRange: null,
     })

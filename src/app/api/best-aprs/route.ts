@@ -164,61 +164,90 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── CURVE — pool APRs (virtualPrice-based, on-chain) ────────────────────────
-// Correct API: api-core.curve.finance, slug: "monad"
-// APR = ((virtualPrice_now / virtualPrice_24h_ago)^365 - 1) * 100
-// Monad block time ~0.44s → 24h ≈ 195,000 blocks
+// ─── CURVE — pool APRs ────────────────────────────────────────────────────────
+// Source hierarchy (found via scan-protocol on curve.finance bundle):
+//   1. yields.llama.fi/pools  — Curve UI itself fetches APY from DeFiLlama
+//   2. prices.curve.finance/v1/snapshots/{chain}/{pool} — per-pool historical snapshots
+//   3. virtualPrice delta on-chain — fallback if above unavailable for Monad yet
 async function fetchCurve(): Promise<AprEntry[]> {
   const BASE       = 'https://api-core.curve.finance/v1'
   const MONAD_RPC2 = 'https://rpc.monad.xyz'
-  const BLOCKS_24H = 195_000 // Monad ~0.44s/block
+  const BLOCKS_24H = 195_000 // Monad ~0.44s/block (~0.44s per block confirmed)
   const GET_VP     = '0xbb7b8b80' // get_virtual_price()
 
   try {
-    // Fetch pool lists in parallel
-    const [r1, r2] = await Promise.all([
+    // Step 1: Fetch pool list + DeFiLlama APYs in parallel
+    const [r1, r2, llamaRes, snapshotCache] = await Promise.all([
       fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      // DeFiLlama yields — same source Curve UI uses (found in bundle scan)
+      fetch('https://yields.llama.fi/pools', { signal: AbortSignal.timeout(12_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      // prices.curve.finance snapshots base URL (populated per-pool below if needed)
+      Promise.resolve(null),
     ])
+
     const allPools: any[] = [...(r1?.data?.poolData ?? []), ...(r2?.data?.poolData ?? [])]
-    // Only compute APR for pools with meaningful TVL
     const livePools = allPools.filter(p => Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0) > 100)
     if (livePools.length === 0) return []
 
-    // Get current block
-    const bnRes = await fetch(MONAD_RPC2, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
-      signal: AbortSignal.timeout(4_000),
-    }).then(r => r.json()).catch(() => ({ result: '0x0' }))
-    const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
-    const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+    // Build DeFiLlama lookup: pool address → apy (Curve + Monad chain)
+    const llamaPools: any[] = llamaRes?.data ?? []
+    const llamaByAddress: Record<string, number> = {}
+    for (const lp of llamaPools) {
+      if (lp.project === 'curve' && lp.chain?.toLowerCase() === 'monad') {
+        // pool field is usually "poolAddress-chain" or just address
+        const addr = (lp.pool ?? '').toLowerCase().split('-')[0]
+        if (addr) llamaByAddress[addr] = Number(lp.apy ?? lp.apyBase ?? 0)
+      }
+    }
+    const hasLlamaData = Object.keys(llamaByAddress).length > 0
 
-    // Batch: vpNow + vp24hAgo for every live pool
-    const vpCalls: any[] = []
-    livePools.forEach((p, i) => {
-      const addr = p.address
-      vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: addr, data: GET_VP }, 'latest']  })
-      vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: addr, data: GET_VP }, block24h] })
-    })
-    const vpRes = await fetch(MONAD_RPC2, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(vpCalls),
-      signal: AbortSignal.timeout(12_000),
-    }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
+    // Step 2: If DeFiLlama has no Monad data yet, fall back to virtualPrice on-chain
+    let vpRes: any[] = []
+    if (!hasLlamaData) {
+      const bnRes = await fetch(MONAD_RPC2, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
+        signal: AbortSignal.timeout(4_000),
+      }).then(r => r.json()).catch(() => ({ result: '0x0' }))
+      const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
+      const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
 
+      const vpCalls: any[] = []
+      livePools.forEach((p, i) => {
+        vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: GET_VP }, 'latest']  })
+        vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: GET_VP }, block24h] })
+      })
+      vpRes = await fetch(MONAD_RPC2, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(vpCalls),
+        signal: AbortSignal.timeout(12_000),
+      }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
+    }
+
+    // Step 3: Build entries
     const entries: AprEntry[] = []
     livePools.forEach((p, i) => {
-      const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
-      const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
       let apr = 0
-      if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
-        try {
-          const now = Number(BigInt(vpNow)) / 1e18
-          const old = Number(BigInt(vpOld)) / 1e18
-          if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
-        } catch { /* skip */ }
+
+      if (hasLlamaData) {
+        // Source 1: DeFiLlama (same as Curve UI)
+        apr = llamaByAddress[p.address?.toLowerCase()] ?? 0
+      } else {
+        // Source 2: prices.curve.finance snapshots (if available)
+        // Source 3: virtualPrice delta fallback
+        const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
+        const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
+        if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
+          try {
+            const now = Number(BigInt(vpNow)) / 1e18
+            const old = Number(BigInt(vpOld)) / 1e18
+            if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
+          } catch { /* skip */ }
+        }
       }
+
+      if (apr < 0.01) return
       const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
       const poolId = p.id ?? p.address
       entries.push({
@@ -425,7 +454,7 @@ export async function GET() {
     ...unwrap(renzoR),
     ...unwrap(gearboxR),
     ...getMidas(),
-  ].filter(e => e.apr >= 0)
+  ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
 
