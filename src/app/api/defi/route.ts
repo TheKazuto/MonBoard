@@ -361,6 +361,7 @@ async function fetchCurve(user: string): Promise<any[]> {
   //   Pool types with data: factory-twocrypto (9), factory-stable-ng (17)
   //   getLiquidityProviderData returns 404 for Monad → use on-chain balance check
   const BASE = 'https://api-core.curve.finance/v1'
+  const MONAD_RPC = 'https://rpc.monad.xyz'
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
 
