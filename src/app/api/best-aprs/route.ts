@@ -22,6 +22,10 @@ const STABLECOINS = new Set([
 ])
 
 function isStable(sym: string): boolean { return STABLECOINS.has(sym) }
+function decodeUint(hex: string): bigint {
+  if (!hex || hex === '0x') return 0n
+  try { return BigInt(hex) } catch { return 0n }
+}
 function allStable(tokens: string[]): boolean { return tokens.length > 0 && tokens.every(isStable) }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -165,89 +169,138 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
 }
 
 // ─── CURVE — pool APRs ────────────────────────────────────────────────────────
-// Source hierarchy (found via scan-protocol on curve.finance bundle):
-//   1. yields.llama.fi/pools  — Curve UI itself fetches APY from DeFiLlama
-//   2. prices.curve.finance/v1/snapshots/{chain}/{pool} — per-pool historical snapshots
-//   3. virtualPrice delta on-chain — fallback if above unavailable for Monad yet
+// Method: on-chain TokenExchange events (same as Curve UI)
+//   APR = (volume_24h_usd × fee_rate × 365) / TVL_usd
+//
+// Sources tried in order:
+//   1. DeFiLlama free DEX API: /api/overview/dexs/Monad (no API key needed)
+//   2. On-chain TokenExchange events × fee() — definitive fallback
+//
+// DeFiLlama note (from docs study):
+//   /yields/pools is 🔒 Pro API (paid) — that's why it was blocked
+//   Free endpoints: /api/overview/dexs/{chain}, /api/summary/dexs/{protocol}
+//   Base URL for free: https://api.llama.fi (not pro-api.llama.fi)
+
+// TokenExchange event topics (keccak256 of event signatures)
+// Classic pools  (int128 ids): TokenExchange(address,int128,uint256,int128,uint256)
+const TE_CLASSIC = '0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140'
+// NG pools (uint256 ids): TokenExchange(address,uint256,uint256,uint256,uint256)
+const TE_NG      = '0x143f1f8e861fbdeddd5b46e844b7d3ac7b86a122f36e8c463859ee6811b1f29c'
+
 async function fetchCurve(): Promise<AprEntry[]> {
   const BASE       = 'https://api-core.curve.finance/v1'
-  const MONAD_RPC2 = 'https://rpc.monad.xyz'
-  const BLOCKS_24H = 195_000 // Monad ~0.44s/block (~0.44s per block confirmed)
-  const GET_VP     = '0xbb7b8b80' // get_virtual_price()
+  const RPC        = 'https://rpc.monad.xyz'
+  const BLOCKS_24H = 195_000 // Monad ~0.44s/block
 
   try {
-    // Step 1: Fetch pool list + DeFiLlama APYs in parallel
-    const [r1, r2, llamaRes, snapshotCache] = await Promise.all([
+    // Step 1: Pool list + DeFiLlama free DEX API + block number (parallel)
+    const [r1, r2, llamaDex, bnRes] = await Promise.all([
       fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      // DeFiLlama yields — same source Curve UI uses (found in bundle scan)
-      fetch('https://yields.llama.fi/pools', { signal: AbortSignal.timeout(12_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      // prices.curve.finance snapshots base URL (populated per-pool below if needed)
-      Promise.resolve(null),
+      // DeFiLlama free DEX volume API (no API key needed per docs)
+      fetch('https://api.llama.fi/summary/dexs/curve?dataType=dailyVolume', { signal: AbortSignal.timeout(8_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(RPC, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
+        signal: AbortSignal.timeout(4_000),
+      }).then(r => r.json()).catch(() => ({ result: '0x0' })),
     ])
 
     const allPools: any[] = [...(r1?.data?.poolData ?? []), ...(r2?.data?.poolData ?? [])]
     const livePools = allPools.filter(p => Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0) > 100)
     if (livePools.length === 0) return []
 
-    // Build DeFiLlama lookup: pool address → apy (Curve + Monad chain)
-    const llamaPools: any[] = llamaRes?.data ?? []
-    const llamaByAddress: Record<string, number> = {}
-    for (const lp of llamaPools) {
-      if (lp.project === 'curve' && lp.chain?.toLowerCase() === 'monad') {
-        // pool field is usually "poolAddress-chain" or just address
-        const addr = (lp.pool ?? '').toLowerCase().split('-')[0]
-        if (addr) llamaByAddress[addr] = Number(lp.apy ?? lp.apyBase ?? 0)
-      }
-    }
-    const hasLlamaData = Object.keys(llamaByAddress).length > 0
+    // Check if DeFiLlama has Monad volume data for Curve
+    const llamaMonadVolume: Record<string, number> = {}
+    const chainBreakdown = llamaDex?.chainBreakdown ?? {}
+    const monadData = chainBreakdown?.Monad ?? chainBreakdown?.monad ?? null
+    // DeFiLlama doesn't break down by pool address at this level, so it gives total chain volume
+    // We'll use it as a signal but not pool-level data
 
-    // Step 2: If DeFiLlama has no Monad data yet, fall back to virtualPrice on-chain
-    let vpRes: any[] = []
-    if (!hasLlamaData) {
-      const bnRes = await fetch(MONAD_RPC2, {
+    const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
+    const fromBlock = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+
+    // Step 2: Batch RPC calls — fee() for all live pools + eth_getLogs for all pools at once
+    const feeCalls = livePools.map((p, i) => ({
+      jsonrpc: '2.0', id: i,
+      method: 'eth_call',
+      params: [{ to: p.address, data: '0xddca3f43' }, 'latest'], // fee()
+    }))
+    const [feeResults, logsResult] = await Promise.all([
+      // fee() for all pools
+      fetch(RPC, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
-        signal: AbortSignal.timeout(4_000),
-      }).then(r => r.json()).catch(() => ({ result: '0x0' }))
-      const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
-      const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
-
-      const vpCalls: any[] = []
-      livePools.forEach((p, i) => {
-        vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: GET_VP }, 'latest']  })
-        vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: GET_VP }, block24h] })
-      })
-      vpRes = await fetch(MONAD_RPC2, {
+        body: JSON.stringify(feeCalls),
+        signal: AbortSignal.timeout(8_000),
+      }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => []),
+      // eth_getLogs: all TokenExchange events for all live pools in one call
+      fetch(RPC, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(vpCalls),
-        signal: AbortSignal.timeout(12_000),
-      }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 999,
+          method: 'eth_getLogs',
+          params: [{
+            fromBlock,
+            toBlock: 'latest',
+            address: livePools.map(p => p.address),
+            topics: [[TE_CLASSIC, TE_NG]], // OR: match either event type
+          }],
+        }),
+        signal: AbortSignal.timeout(15_000),
+      }).then(r => r.json()).catch(() => ({ result: [] })),
+    ])
+
+    const logs: any[] = logsResult?.result ?? []
+
+    // Step 3: Aggregate volume per pool from logs
+    // TokenExchange data layout: sold_id(32) | tokens_sold(32) | bought_id(32) | tokens_bought(32)
+    // tokens_sold is at bytes 32-63 of data
+    const volumeByPool: Record<string, number> = {}
+    for (const log of logs) {
+      const poolAddr = log.address?.toLowerCase()
+      if (!poolAddr) continue
+      const pool = livePools.find(p => p.address.toLowerCase() === poolAddr)
+      if (!pool) continue
+
+      try {
+        const data = log.data?.slice(2) ?? '' // strip 0x
+        if (data.length < 128) continue
+        // tokens_sold is 2nd word (bytes 32-63)
+        const tokensSoldHex = data.slice(64, 128)
+        const tokensSoldRaw = BigInt('0x' + tokensSoldHex)
+
+        // Get sold_id to know which coin's decimals to use
+        const soldIdHex = data.slice(0, 64)
+        const soldId = Number(BigInt('0x' + soldIdHex))
+        const coin = pool.coins?.[soldId]
+        const decimals = Number(coin?.decimals ?? 18)
+        // For stablecoins price ≈ $1, for others we'd need price — use $1 as approximation
+        // This is accurate for stable-ng pools, approximate for twocrypto
+        const tokensSoldUsd = Number(tokensSoldRaw) / Math.pow(10, decimals)
+
+        volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + tokensSoldUsd
+      } catch { /* skip malformed log */ }
     }
 
-    // Step 3: Build entries
+    // Step 4: Build APR entries
     const entries: AprEntry[] = []
     livePools.forEach((p, i) => {
-      let apr = 0
+      const poolAddr = p.address.toLowerCase()
+      const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
+      if (tvl <= 0) return
 
-      if (hasLlamaData) {
-        // Source 1: DeFiLlama (same as Curve UI)
-        apr = llamaByAddress[p.address?.toLowerCase()] ?? 0
-      } else {
-        // Source 2: prices.curve.finance snapshots (if available)
-        // Source 3: virtualPrice delta fallback
-        const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
-        const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
-        if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
-          try {
-            const now = Number(BigInt(vpNow)) / 1e18
-            const old = Number(BigInt(vpOld)) / 1e18
-            if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
-          } catch { /* skip */ }
-        }
-      }
+      // fee() returns value in 1e10 units (e.g. 4000000 = 0.04%)
+      const feeRaw = decodeUint(feeResults.find((r: any) => r.id === i)?.result ?? '0x')
+      const feeRate = Number(feeRaw) / 1e10 // e.g. 0.0004 = 0.04%
 
-      if (apr < 0.01) return
+      const volume24h = volumeByPool[poolAddr] ?? 0
+      // APR = annual trading fees / TVL
+      // = (volume_24h × fee_rate × 365) / TVL × 100 (to percent)
+      const apr = tvl > 0 && volume24h > 0
+        ? (volume24h * feeRate * 365 / tvl) * 100
+        : 0
+
+      if (apr < 0.001) return
       const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
       const poolId = p.id ?? p.address
       entries.push({

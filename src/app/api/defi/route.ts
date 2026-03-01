@@ -364,27 +364,24 @@ async function fetchCurve(user: string): Promise<any[]> {
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
 
-  // Step 1: Fetch pool lists + DeFiLlama APYs in parallel
-  // DeFiLlama is the same APY source the Curve UI uses (confirmed via bundle scan)
+  // Step 1: Fetch pool lists + block number in parallel
   const poolTypes = ['factory-twocrypto', 'factory-stable-ng']
-  const [llamaRes, ...poolFetches] = await Promise.all([
-    fetch('https://yields.llama.fi/pools', { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-      .then(r => r.ok ? r.json() : null).catch(() => null),
+  const [bnRes, ...poolFetches] = await Promise.all([
+    fetch(MONAD_RPC, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
+      signal: AbortSignal.timeout(4_000),
+    }).then(r => r.json()).catch(() => ({ result: '0x0' })),
     ...poolTypes.map(t =>
       fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
         .then(r => r.ok ? r.json() : null)
         .catch(() => null)
     ),
   ])
-
-  // Build DeFiLlama APY lookup by pool address
-  const llamaByAddress: Record<string, number> = {}
-  for (const lp of (llamaRes?.data ?? [])) {
-    if (lp.project === 'curve' && lp.chain?.toLowerCase() === 'monad') {
-      const addr = (lp.pool ?? '').toLowerCase().split('-')[0]
-      if (addr) llamaByAddress[addr] = Number(lp.apy ?? lp.apyBase ?? 0)
-    }
-  }
+  const currentBlockHex = bnRes?.result ?? '0x0'
+  const BLOCKS_24H = 195_000
+  const currentBlock = Number(BigInt(currentBlockHex))
+  const fromBlock24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
 
   // Flatten all pools into one list with metadata
   const allPools: any[] = []
@@ -394,15 +391,64 @@ async function fetchCurve(user: string): Promise<any[]> {
   }
   if (allPools.length === 0) return []
 
-  // Step 2: Batch ALL balanceOf calls in one RPC request (fast!)
+  // Step 2: Batch balanceOf + fee() for all pools, plus eth_getLogs for TokenExchange events
+  const TE_CLASSIC = '0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140'
+  const TE_NG      = '0x143f1f8e861fbdeddd5b46e844b7d3ac7b86a122f36e8c463859ee6811b1f29c'
+
   const balanceCalls = allPools.map((pool, i) => ({
-    jsonrpc: '2.0',
-    id: i,
+    jsonrpc: '2.0', id: i,
     method: 'eth_call',
     params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
   }))
+  const feeCalls = allPools.map((pool, i) => ({
+    jsonrpc: '2.0', id: i + 1000,
+    method: 'eth_call',
+    params: [{ to: pool.address, data: '0xddca3f43' }, 'latest'], // fee()
+  }))
 
-  const rpcRes = await rpcBatch(balanceCalls, 10_000)
+  const [rpcRes, feeRes, logsRes] = await Promise.all([
+    rpcBatch(balanceCalls, 10_000),
+    rpcBatch(feeCalls, 8_000),
+    rpcBatch([{
+      jsonrpc: '2.0', id: 9999,
+      method: 'eth_getLogs',
+      params: [{
+        fromBlock: fromBlock24h,
+        toBlock: 'latest',
+        address: allPools.map(p => p.address),
+        topics: [[TE_CLASSIC, TE_NG]],
+      }],
+    }], 15_000),
+  ])
+
+  // Aggregate 24h volume per pool from TokenExchange logs
+  const logs: any[] = logsRes.find((r: any) => r.id === 9999)?.result ?? []
+  const volumeByPool: Record<string, number> = {}
+  for (const log of logs) {
+    const poolAddr = log.address?.toLowerCase()
+    const pool = allPools.find(p => p.address.toLowerCase() === poolAddr)
+    if (!pool) continue
+    try {
+      const data = log.data?.slice(2) ?? ''
+      if (data.length < 128) continue
+      const soldId    = Number(BigInt('0x' + data.slice(0, 64)))
+      const tokensSold = BigInt('0x' + data.slice(64, 128))
+      const decimals  = Number(pool.coins?.[soldId]?.decimals ?? 18)
+      volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + Number(tokensSold) / Math.pow(10, decimals)
+    } catch { /* skip */ }
+  }
+
+  // Calculate APR per pool: (volume_24h × fee_rate × 365) / TVL × 100
+  const curveAprByPool: Record<string, number> = {}
+  allPools.forEach((pool, i) => {
+    const tvl = Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
+    if (tvl <= 0) return
+    const feeRaw  = decodeUint(feeRes.find((r: any) => r.id === i + 1000)?.result ?? '0x')
+    const feeRate = Number(feeRaw) / 1e10
+    const vol24h  = volumeByPool[pool.address?.toLowerCase()] ?? 0
+    if (vol24h > 0 && feeRate > 0)
+      curveAprByPool[pool.address?.toLowerCase()] = (vol24h * feeRate * 365 / tvl) * 100
+  })
 
   // Step 3: Build positions only for pools where user has balance
   const positions: any[] = []
@@ -430,15 +476,13 @@ async function fetchCurve(user: string): Promise<any[]> {
 
     const coins = pool.coins?.map((c: any) => c.symbol) ?? []
     const poolId = pool.id ?? pool.address
-    // Use DeFiLlama APY if available (same source as Curve UI), else 0
-    const apy = llamaByAddress[pool.address?.toLowerCase()] ?? 0
     positions.push({
       protocol: 'Curve', type: 'liquidity', logo: '🌊',
       url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`, chain: 'Monad',
       label: pool.name ?? coins.join('/'),
       tokens: coins,
       amountUSD: netValueUSD,
-      apy,
+      apy: curveAprByPool[pool.address?.toLowerCase()] ?? 0,
       netValueUSD,
       inRange: null,
     })
