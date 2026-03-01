@@ -5,7 +5,7 @@ async function tryFetch(url: string, opts?: RequestInit) {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store', ...opts })
     const text = await r.text()
-    if (!r.ok) return { status: r.status, body: text.slice(0, 300) }
+    if (!r.ok) return { status: r.status, body: text.slice(0, 500) }
     try { return JSON.parse(text) } catch { return text.slice(0, 500) }
   } catch(e: any) { return { error: e.message } }
 }
@@ -13,54 +13,47 @@ async function tryFetch(url: string, opts?: RequestInit) {
 export async function GET() {
   const results: any = {}
 
-  // 1. Merkl API - PancakeSwap uses this for liquidity campaigns
-  for (const id of [10143, 143]) {
-    results[`merkl_${id}`] = await tryFetch(
-      `https://api.merkl.xyz/v4/opportunities/?chainId=${id}&test=false&mainProtocolId=pancakeswap`,
-    )
+  // 1. Farms with numeric chain IDs (discovered: 143 and 10143 are valid)
+  results.farms_143 = await tryFetch('https://pancakeswap.finance/api/v3/143/farms')
+  results.farms_10143 = await tryFetch('https://pancakeswap.finance/api/v3/10143/farms')
+
+  // 2. Explorer cached pools with QUERY PARAMS (not POST body)
+  const explorerBase = 'https://explorer.pancakeswap.com/api/cached/pools/list'
+  for (const proto of ['v2', 'v3', 'v4']) {
+    for (const chain of ['monad', 'monadMainnet', '10143', '143']) {
+      const url = `${explorerBase}?protocols=${proto}&chains=${chain}&orderBy=tvlUSD`
+      results[`explorer_${proto}_${chain}`] = await tryFetch(url)
+    }
   }
 
-  // 2. Explorer API - try different paths
-  const explorerBase = 'https://explorer.pancakeswap.com/api'
-  for (const id of [10143, 143]) {
-    results[`explorer_cached_${id}`] = await tryFetch(`${explorerBase}/cached/pools/list?chainId=${id}`)
-    results[`explorer_v1_${id}`] = await tryFetch(`${explorerBase}/v1/pools?chainId=${id}`)
+  // 3. Try tvl-refs with query params instead of POST
+  const tvlBase = 'https://explorer.pancakeswap.com/api/cached/pools/tvl-refs'
+  for (const chain of ['monad', 'monadMainnet', '10143', '143']) {
+    results[`tvlrefs_v3_${chain}`] = await tryFetch(`${tvlBase}?protocols=v3&chains=${chain}`)
   }
 
-  // 3. Try their main config endpoint to discover Monad chain info
-  results.config_chains = await tryFetch('https://configs.pancakeswap.com/api/data/cached/chains')
-
-  // 4. PancakeSwap specific config endpoints
-  for (const id of [10143, 143]) {
-    results[`config_pools_${id}`] = await tryFetch(`https://configs.pancakeswap.com/api/data/cached/pools?chainId=${id}`)
-    results[`config_v4_${id}`] = await tryFetch(`https://configs.pancakeswap.com/api/data/cached/v4-pools?chainId=${id}`)
-  }
-
-  // 5. Try the incentra/brevis endpoint from the scan
-  results.incentra = await tryFetch('https://incentra-prd.brevis.network/sdk/v1/campaigns?protocol=pancakeswap&chainId=10143')
-
-  // 6. Try the liquidityCampaigns endpoint from the scan
-  for (const base of [
-    'https://explorer.pancakeswap.com/api',
-    'https://configs.pancakeswap.com/api/data'
-  ]) {
-    results[`liqCampaigns_${base.includes('explorer') ? 'explorer' : 'configs'}`] = await tryFetch(
-      `${base}/liquidityCampaigns`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chainId: 10143 }) }
-    )
-  }
-
-  // 7. Try the farms endpoint with proper chain names
-  for (const chain of ['monadMainnet', 'monad-mainnet', 'MONAD_MAINNET']) {
-    results[`farms_${chain}`] = await tryFetch(`https://pancakeswap.finance/api/v3/${chain}/farms`)
-  }
-
-  // 8. Explorer cached/pools/tvl-refs with different protocol values
-  for (const proto of ['v2', 'v3', 'v4', 'stable']) {
-    results[`tvlrefs_${proto}`] = await tryFetch(
-      `${explorerBase}/cached/pools/tvl-refs`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ protocols: [proto], chains: [10143] }) }
-    )
+  // 4. Summarize farms response if it works
+  for (const key of ['farms_143', 'farms_10143']) {
+    const data = results[key]
+    if (Array.isArray(data)) {
+      results[`${key}_summary`] = {
+        count: data.length,
+        first: data[0] ? { 
+          token0: data[0].token0?.symbol || data[0].quoteToken?.symbol,
+          token1: data[0].token1?.symbol || data[0].token?.symbol,
+          apr: data[0].apr || data[0].cakeApr,
+          tvl: data[0].tvl || data[0].liquidity
+        } : null
+      }
+    } else if (data && typeof data === 'object' && !data.status) {
+      // Might be an object with farms inside
+      const keys = Object.keys(data).slice(0, 5)
+      results[`${key}_keys`] = keys
+      if (data.farmsWithPrice || data.data || data.pools) {
+        const arr = data.farmsWithPrice || data.data || data.pools
+        results[`${key}_summary`] = { count: arr?.length, first: arr?.[0] }
+      }
+    }
   }
 
   return NextResponse.json(results, { status: 200 })
