@@ -181,12 +181,6 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
 //   Free endpoints: /api/overview/dexs/{chain}, /api/summary/dexs/{protocol}
 //   Base URL for free: https://api.llama.fi (not pro-api.llama.fi)
 
-// TokenExchange event topics (keccak256 of event signatures)
-// Classic pools  (int128 ids): TokenExchange(address,int128,uint256,int128,uint256)
-const TE_CLASSIC = '0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140'
-// NG pools (uint256 ids): TokenExchange(address,uint256,uint256,uint256,uint256)
-const TE_NG      = '0x143f1f8e861fbdeddd5b46e844b7d3ac7b86a122f36e8c463859ee6811b1f29c'
-
 async function fetchCurve(): Promise<AprEntry[]> {
   const BASE       = 'https://api-core.curve.finance/v1'
   const RPC        = 'https://rpc.monad.xyz'
@@ -218,100 +212,36 @@ async function fetchCurve(): Promise<AprEntry[]> {
     // We'll use it as a signal but not pool-level data
 
     const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
-    const fromBlock = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+    // Step 2: virtualPrice delta APR — confirmed working on Monad
+    // Note: eth_getLogs is limited to 100 blocks on Monad RPC — unusable for 24h volume
+    // virtualPrice grows as trading fees accumulate → reliable APR proxy
+    const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+    const vpCalls: any[] = []
+    livePools.forEach((p, i) => {
+      vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, 'latest']  })
+      vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, block24h] })
+    })
+    const vpRes = await fetch(RPC, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(vpCalls),
+      signal: AbortSignal.timeout(12_000),
+    }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
 
-    // Step 2: Batch RPC calls — fee() for all live pools + eth_getLogs for all pools at once
-    const feeCalls = livePools.map((p, i) => ({
-      jsonrpc: '2.0', id: i,
-      method: 'eth_call',
-      params: [{ to: p.address, data: '0xddca3f43' }, 'latest'], // fee()
-    }))
-    const [feeResults, logsResult] = await Promise.all([
-      // fee() for all pools
-      fetch(RPC, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(feeCalls),
-        signal: AbortSignal.timeout(8_000),
-      }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => []),
-      // eth_getLogs: all TokenExchange events for all live pools in one call
-      fetch(RPC, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 999,
-          method: 'eth_getLogs',
-          params: [{
-            fromBlock,
-            toBlock: 'latest',
-            address: livePools.map(p => p.address),
-            topics: [[TE_CLASSIC, TE_NG]], // OR: match either event type
-          }],
-        }),
-        signal: AbortSignal.timeout(15_000),
-      }).then(r => r.json()).catch(() => ({ result: [] })),
-    ])
-
-    const logs: any[] = Array.isArray(logsResult?.result) ? logsResult.result : []
-
-    // Step 3: Aggregate volume per pool from TokenExchange logs
-    const volumeByPool: Record<string, number> = {}
-    for (const log of logs) {
-      const poolAddr = log.address?.toLowerCase()
-      const pool = livePools.find(p => p.address.toLowerCase() === poolAddr)
-      if (!pool) continue
-      try {
-        const data = log.data?.slice(2) ?? ''
-        if (data.length < 128) continue
-        const soldId    = Number(BigInt('0x' + data.slice(0, 64)))
-        const tokensSold = BigInt('0x' + data.slice(64, 128))
-        const decimals  = Number(pool.coins?.[soldId]?.decimals ?? 18)
-        volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + Number(tokensSold) / Math.pow(10, decimals)
-      } catch { /* skip */ }
-    }
-
-    const hasVolumeData = Object.keys(volumeByPool).length > 0
-
-    // Step 4: If no volume data from logs (RPC limit or no trades), fallback to virtualPrice delta
-    let vpRes: any[] = []
-    if (!hasVolumeData) {
-      const vpCalls: any[] = []
-      const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
-      livePools.forEach((p, i) => {
-        vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, 'latest']  })
-        vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, block24h] })
-      })
-      vpRes = await fetch(RPC, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(vpCalls),
-        signal: AbortSignal.timeout(12_000),
-      }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
-    }
-
-    // Step 5: Build APR entries
+    // Step 3: Build APR entries
     const entries: AprEntry[] = []
     livePools.forEach((p, i) => {
-      const poolAddr = p.address.toLowerCase()
       const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
       if (tvl <= 0) return
 
+      const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
+      const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
       let apr = 0
-
-      if (hasVolumeData) {
-        // Volume-based APR: (volume_24h × fee_rate × 365) / TVL × 100
-        const feeRaw  = decodeUint(feeResults.find((r: any) => r.id === i)?.result ?? '0x')
-        const feeRate = Number(feeRaw) / 1e10
-        const vol24h  = volumeByPool[poolAddr] ?? 0
-        if (vol24h > 0 && feeRate > 0) apr = (vol24h * feeRate * 365 / tvl) * 100
-      } else {
-        // Fallback: virtualPrice delta APR
-        const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
-        const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
-        if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
-          try {
-            const now = Number(BigInt(vpNow)) / 1e18
-            const old = Number(BigInt(vpOld)) / 1e18
-            if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
-          } catch { /* skip */ }
-        }
+      if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
+        try {
+          const now = Number(BigInt(vpNow)) / 1e18
+          const old = Number(BigInt(vpOld)) / 1e18
+          if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
+        } catch { /* skip */ }
       }
 
       if (apr < 0.001) return
