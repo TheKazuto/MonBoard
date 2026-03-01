@@ -48,11 +48,39 @@ async function tryFetch(url: string): Promise<{ status: number; ok: boolean; bod
   }
 }
 
-// ─── CURVE: Test final implementation ─────────────────────────────────────────
+// ─── CURVE: Find APR endpoint ─────────────────────────────────────────────────
 async function debugCurve(user: string) {
   const BASE = 'https://api-core.curve.finance/v1'
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
+
+  // Test every plausible APY/APR endpoint for Monad
+  const aprEndpoints = [
+    `${BASE}/getPoolsApys/monad`,
+    `${BASE}/getPoolsApys/monad/factory-stable-ng`,
+    `${BASE}/getPoolsApys/monad/factory-twocrypto`,
+    `${BASE}/getSubgraphData/monad`,
+    `${BASE}/getVolumes/monad`,
+    `${BASE}/getStats/monad`,
+    `${BASE}/getGauges/monad`,
+    'https://api.curve.finance/api/getSubgraphData/monad',
+    'https://api.curve.finance/api/getVolumes/monad',
+    'https://api.curve.finance/api/getStats/monad',
+  ]
+  const aprResults: Record<string, any> = {}
+  for (const url of aprEndpoints) {
+    const r = await tryFetch(url)
+    const key = url.replace('https://api-core.curve.finance/v1/', '').replace('https://api.curve.finance/api/', 'api/')
+    aprResults[key] = {
+      status: r.status,
+      ok: r.ok,
+      error: r.error,
+      // Show top-level keys if successful
+      topKeys: r.ok && r.body ? Object.keys(r.body).slice(0, 10) : undefined,
+      // Show first item if it's an array or has a data array
+      sample: r.ok && r.body?.data ? (Array.isArray(r.body.data) ? r.body.data[0] : Object.keys(r.body.data).slice(0, 5)) : undefined,
+    }
+  }
 
   // Fetch both active pool types
   const [twocrypto, stableNg] = await Promise.all([
@@ -109,6 +137,7 @@ async function debugCurve(user: string) {
     stableNgCount: stableNg.body?.data?.poolData?.length ?? 0,
     userAddress: addr,
     firstPoolAllKeys: firstPoolKeys,
+    aprEndpointResults: aprResults,   // ← where APR lives
     poolsWithBalance,
     allPoolsChecked: poolsChecked,
     note: poolsWithBalance.length === 0 ? 'User has no Curve LP positions' : `Found ${poolsWithBalance.length} positions`,
