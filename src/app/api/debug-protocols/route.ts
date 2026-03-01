@@ -48,60 +48,40 @@ async function tryFetch(url: string): Promise<{ status: number; ok: boolean; bod
   }
 }
 
-// ─── CURVE: On-chain MetaRegistry enumeration ─────────────────────────────────
+// ─── CURVE: Test correct API (api-core.curve.finance) ─────────────────────────
 async function debugCurve(user: string) {
-  const META_REGISTRY  = '0xe6da14500f0b5783e2325f9c5a7ee5d99da0fb42'
-  const ADDR_PROVIDER  = '0x4574921eb950d3fd5b01562162ec566cb8bc3648'
+  const BASE = 'https://api-core.curve.finance/v1'
 
-  // Pool count
-  const countRes = await rpcBatch([
-    ethCall(META_REGISTRY, '0x92a4419f', 1),
-    ethCall(ADDR_PROVIDER,  '0x92a4419f', 2),
-  ])
-  const metaPoolCount = Number(decodeUint(countRes[0]?.result ?? '0x'))
-  const apPoolCount   = Number(decodeUint(countRes[1]?.result ?? '0x'))
+  // Test all confirmed endpoints from Network tab
+  const apiTests: Record<string, any> = {}
 
-  // Enumerate first 10 pools
-  const poolsToCheck = Math.min(metaPoolCount, 10)
-  const poolListCalls = Array.from({ length: poolsToCheck }, (_, i) =>
-    ethCall(META_REGISTRY, '0x3a1d5d8e' + padUint(i), 100 + i)
-  )
-  const poolListRes = poolsToCheck > 0 ? await rpcBatch(poolListCalls) : []
-  const poolAddresses = poolListRes
-    .map(r => decodeAddress(r?.result ?? '0x'))
-    .filter(a => a !== '0x0' && a !== '0x0000000000000000000000000000000000000000')
+  const endpoints = [
+    `${BASE}/getLiquidityProviderData/${user.toLowerCase()}/monad`,
+    `${BASE}/getPools/monad/factory-twocrypto`,
+    `${BASE}/getPools/monad/factory-tricrypto`,
+    `${BASE}/getPools/monad/factory-stable-ng`,
+    `${BASE}/getDeployment/monad`,
+    `${BASE}/getPlatforms`,
+  ]
 
-  // For each pool: LP token, name, totalSupply, user LP balance
-  const poolInfoCalls: any[] = []
-  for (let i = 0; i < poolAddresses.length; i++) {
-    const pool = poolAddresses[i]
-    poolInfoCalls.push(
-      ethCall(META_REGISTRY, '0xd9af49b5' + padAddr(pool), 200 + i * 4), // get_lp_token(pool)
-      ethCall(pool,          '0x06fdde03',                  201 + i * 4), // name()
-      ethCall(pool,          '0x18160ddd',                  202 + i * 4), // totalSupply()
-      ethCall(pool,          '0x70a08231' + padAddr(user),  203 + i * 4), // balanceOf(user)
-    )
+  for (const url of endpoints) {
+    const r = await tryFetch(url)
+    const key = url.split('/').slice(-2).join('/')
+    if (r.ok && r.body) {
+      // For pool lists, show count
+      const poolData = r.body?.data?.poolData ?? r.body?.data?.lpData ?? null
+      apiTests[key] = {
+        status: r.status,
+        ok: true,
+        poolCount: Array.isArray(poolData) ? poolData.length : undefined,
+        sample: poolData ? poolData[0] : (typeof r.body === 'object' ? Object.keys(r.body).slice(0, 5) : r.body?.toString?.()?.slice(0, 200)),
+      }
+    } else {
+      apiTests[key] = { status: r.status, ok: false, error: r.error }
+    }
   }
-  const poolInfoRes = poolInfoCalls.length > 0 ? await rpcBatch(poolInfoCalls) : []
 
-  const pools = poolAddresses.map((pool, i) => ({
-    pool,
-    lpToken:     decodeAddress(poolInfoRes[i * 4]?.result ?? '0x'),
-    name:        decodeString(poolInfoRes[i * 4 + 1]?.result ?? '0x'),
-    totalSupply: decodeUint(poolInfoRes[i * 4 + 2]?.result ?? '0x').toString(),
-    userBalance: decodeUint(poolInfoRes[i * 4 + 3]?.result ?? '0x').toString(),
-    rawResults:  {
-      lpToken: poolInfoRes[i * 4]?.result?.slice(0, 66),
-      name:    poolInfoRes[i * 4 + 1]?.result?.slice(0, 130),
-    },
-  }))
-
-  return {
-    metaPoolCount,
-    apPoolCount,
-    pools,
-    note: `MetaRegistry has ${metaPoolCount} pools. Showing first ${poolsToCheck}.`,
-  }
+  return { apiTests, correctBase: BASE, correctSlug: 'monad' }
 }
 
 // ─── KURU: Deep contract introspection + event scan ───────────────────────────
