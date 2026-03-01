@@ -212,7 +212,34 @@ async function fetchNeverland(user: string): Promise<any[]> {
 
 // ─── MORPHO ───────────────────────────────────────────────────────────────────
 async function fetchMorpho(user: string): Promise<any[]> {
-  const query = `query($addr:String!,$cid:Int!){userByAddress(address:$addr,chainId:$cid){marketPositions{market{uniqueKey loanAsset{symbol decimals}collateralAsset{symbol decimals}state{supplyApy borrowApy}}supplyAssets supplyAssetsUsd borrowAssets borrowAssetsUsd collateral collateralUsd healthFactor}vaultPositions{vault{address name symbol asset{symbol decimals}state{netApy}}assets assetsUsd}}}`
+  // GraphQL confirmed at api.morpho.org/graphql for Monad (chainId 143)
+  // Added: market.uniqueKey and vault.address for direct deep links
+  const query = `query($addr:String!,$cid:Int!){
+    userByAddress(address:$addr,chainId:$cid){
+      marketPositions{
+        market{
+          uniqueKey
+          loanAsset{symbol decimals}
+          collateralAsset{symbol decimals}
+          state{supplyApy borrowApy}
+        }
+        supplyAssets supplyAssetsUsd
+        borrowAssets borrowAssetsUsd
+        collateral collateralUsd
+        healthFactor
+      }
+      vaultPositions{
+        vault{
+          address
+          name
+          symbol
+          asset{symbol decimals}
+          state{netApy totalAssetsUsd}
+        }
+        assets assetsUsd
+      }
+    }
+  }`
   try {
     const res = await fetch('https://api.morpho.org/graphql', {
       method: 'POST',
@@ -224,34 +251,42 @@ async function fetchMorpho(user: string): Promise<any[]> {
     const u = data?.data?.userByAddress
     if (!u) return []
     const out: any[] = []
+
     for (const p of u.marketPositions ?? []) {
       const supUSD = Number(p.supplyAssetsUsd ?? 0)
       const borUSD = Number(p.borrowAssetsUsd ?? 0)
       const colUSD = Number(p.collateralUsd ?? 0)
       if (supUSD < 0.01 && borUSD < 0.01 && colUSD < 0.01) continue
-      const loanSym = p.market?.loanAsset?.symbol ?? '?'
-      const collSym = p.market?.collateralAsset?.symbol
+      const loanSym  = p.market?.loanAsset?.symbol ?? '?'
+      const collSym  = p.market?.collateralAsset?.symbol
       const supplyApy = p.market?.state?.supplyApy ? Number(p.market.state.supplyApy) * 100 : 0
       const borrowApy = p.market?.state?.borrowApy ? Number(p.market.state.borrowApy) * 100 : 0
+      const url = p.market?.uniqueKey
+        ? `https://app.morpho.org/monad/market?id=${p.market.uniqueKey}`
+        : 'https://app.morpho.org/monad'
       out.push({
         protocol: 'Morpho', type: 'lending', logo: '🦋',
-        url: 'https://app.morpho.org', chain: 'Monad',
-        label: collSym ? `${collSym}/${loanSym}` : loanSym,
-        supply: supUSD > 0.01 ? [{ symbol: loanSym, amountUSD: supUSD, apy: supplyApy }] : [],
+        url, chain: 'Monad',
+        label: collSym ? `${collSym} / ${loanSym}` : loanSym,
+        supply:     supUSD > 0.01 ? [{ symbol: loanSym, amountUSD: supUSD, apy: supplyApy }] : [],
         collateral: colUSD > 0.01 ? [{ symbol: collSym, amountUSD: colUSD }] : [],
-        borrow: borUSD > 0.01 ? [{ symbol: loanSym, amountUSD: borUSD, apr: borrowApy }] : [],
+        borrow:     borUSD > 0.01 ? [{ symbol: loanSym, amountUSD: borUSD, apr: borrowApy }] : [],
         totalCollateralUSD: colUSD + supUSD,
         totalDebtUSD: borUSD,
         netValueUSD: colUSD + supUSD - borUSD,
         healthFactor: p.healthFactor ? Number(p.healthFactor) : null,
       })
     }
+
     for (const p of u.vaultPositions ?? []) {
       const usd = Number(p.assetsUsd ?? 0)
       if (usd < 0.01) continue
+      const url = p.vault?.address
+        ? `https://app.morpho.org/monad/vault?address=${p.vault.address}`
+        : 'https://app.morpho.org/monad'
       out.push({
         protocol: 'Morpho', type: 'vault', logo: '🦋',
-        url: 'https://app.morpho.org', chain: 'Monad',
+        url, chain: 'Monad',
         label: p.vault?.name ?? p.vault?.symbol,
         asset: p.vault?.asset?.symbol,
         amountUSD: usd,

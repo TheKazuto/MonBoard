@@ -48,17 +48,22 @@ function rayToApr(hex: string, wordIndex: number): number {
 
 // ─── MORPHO — markets (lend) + vaults ────────────────────────────────────────
 async function fetchMorpho(): Promise<AprEntry[]> {
+  // GraphQL confirmed at api.morpho.org/graphql for Monad (chainId 143)
+  // Fields added: address (for direct links), totalAssets (for TVL sorting),
+  //               whitelisted filter (exclude empty/inactive markets)
   const query = `{
-    markets(where:{chainId_in:[143]},first:100) {
+    markets(where:{chainId_in:[143], whitelisted:true}, first:100, orderBy:SupplyAssetsUsd, orderDirection:Desc) {
       uniqueKey
       loanAsset { symbol }
       collateralAsset { symbol }
-      state { supplyApy borrowApy }
+      state { supplyApy borrowApy supplyAssetsUsd }
     }
-    vaults(where:{chainId_in:[143]},first:50) {
+    vaults(where:{chainId_in:[143], whitelisted:true}, first:50, orderBy:TotalAssetsUsd, orderDirection:Desc) {
+      address
       name
+      symbol
       asset { symbol }
-      state { netApy }
+      state { netApy totalAssetsUsd }
     }
   }`
   try {
@@ -77,8 +82,12 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       const collSym  = m.collateralAsset?.symbol
       if (supplyApr < 0.01) continue
       const tokens = collSym ? [collSym, loanSym] : [loanSym]
+      // Link directly to this market using uniqueKey
+      const url = m.uniqueKey
+        ? `https://app.morpho.org/monad/market?id=${m.uniqueKey}`
+        : 'https://app.morpho.org/monad'
       out.push({
-        protocol: 'Morpho', logo: '🦋', url: 'https://app.morpho.org',
+        protocol: 'Morpho', logo: '🦋', url,
         tokens, label: collSym ? `${collSym} / ${loanSym}` : loanSym,
         apr: supplyApr, type: 'lend', isStable: allStable(tokens),
       })
@@ -87,9 +96,13 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       const netApr = Number(v.state?.netApy ?? 0) * 100
       const sym    = v.asset?.symbol ?? '?'
       if (netApr < 0.01) continue
+      // Link directly to this vault using its address
+      const url = v.address
+        ? `https://app.morpho.org/monad/vault?address=${v.address}`
+        : 'https://app.morpho.org/monad'
       out.push({
-        protocol: 'Morpho', logo: '🦋', url: 'https://app.morpho.org',
-        tokens: [sym], label: v.name ?? sym,
+        protocol: 'Morpho', logo: '🦋', url,
+        tokens: [sym], label: v.name ?? v.symbol ?? sym,
         apr: netApr, type: 'vault', isStable: isStable(sym),
       })
     }
