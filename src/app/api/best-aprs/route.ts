@@ -59,21 +59,24 @@ async function fetchMorpho(): Promise<AprEntry[]> {
   // GraphQL confirmed at api.morpho.org/graphql for Monad (chainId 143)
   // Note: removed whitelisted filter — not supported on Monad schema, breaks query
   // supplyApy/netApy are returned as APY (not APR) — converted below
-  // Minimal query — removed orderBy/orderDirection and supplyAssetsUsd/totalAssetsUsd
-  // to avoid schema fields that may not exist on Monad's GraphQL endpoint
+  // Schema uses PaginatedMarkets/PaginatedMetaMorphos — fields are under .items
   const query = `{
     markets(where:{chainId_in:[143]}, first:100) {
-      uniqueKey
-      loanAsset { symbol }
-      collateralAsset { symbol }
-      state { supplyApy borrowApy }
+      items {
+        uniqueKey
+        loanAsset { symbol }
+        collateralAsset { symbol }
+        state { supplyApy borrowApy }
+      }
     }
     vaults(where:{chainId_in:[143]}, first:50) {
-      address
-      name
-      symbol
-      asset { symbol }
-      state { netApy }
+      items {
+        address
+        name
+        symbol
+        asset { symbol }
+        state { netApy }
+      }
     }
   }`
   try {
@@ -86,7 +89,7 @@ async function fetchMorpho(): Promise<AprEntry[]> {
     const data = await res.json()
     const out: AprEntry[] = []
 
-    for (const m of data?.data?.markets ?? []) {
+    for (const m of data?.data?.markets?.items ?? []) {
       // supplyApy from API is already a decimal (e.g. 0.05 = 5%) — convert APY→APR
       const supplyApy = Number(m.state?.supplyApy ?? 0)
       const supplyApr = apyToApr(supplyApy) * 100 // to percent
@@ -103,7 +106,7 @@ async function fetchMorpho(): Promise<AprEntry[]> {
         apr: supplyApr, type: 'lend', isStable: allStable(tokens),
       })
     }
-    for (const v of data?.data?.vaults ?? []) {
+    for (const v of data?.data?.vaults?.items ?? []) {
       // netApy from API is a decimal — convert APY→APR
       const netApy = Number(v.state?.netApy ?? 0)
       const netApr = apyToApr(netApy) * 100 // to percent
