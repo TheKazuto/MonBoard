@@ -561,35 +561,60 @@ async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
 // Confirmed $3.42M TVL on Monad per DefiLlama
 // No public REST API — must query vaults on-chain (addresses not yet publicly listed)
 async function fetchLagoon(user: string): Promise<any[]> {
+  // Confirmed working endpoint (found via debug-all): app.lagoon.finance/api/vaults?chainId=143
+  // Returns all vaults; we check user LP balance on-chain for each
   const addr = user.toLowerCase()
-  // Try multiple API endpoint patterns
-  const endpoints = [
-    `https://api.lagoon.finance/api/v1/positions?address=${addr}&chainId=143`,
-    `https://api.lagoon.finance/api/v1/vaults?address=${addr}&network=monad`,
-    `https://app.lagoon.finance/api/positions?address=${addr}&chainId=143`,
-  ]
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      if (!res.ok) continue
-      const data = await res.json()
-      const vaults = data?.vaults ?? data?.positions ?? data?.data ?? []
-      if (Array.isArray(vaults) && vaults.length >= 0) {
-        return vaults
-          .filter((v: any) => Number(v.valueUsd ?? v.amountUsd ?? v.shares ?? 0) > 0.01)
-          .map((v: any) => ({
-            protocol: 'Lagoon', type: 'vault', logo: '🏝️',
-            url: `https://app.lagoon.finance/vault/143/${v.address ?? ''}`, chain: 'Monad',
-            label: v.name ?? v.vaultName ?? 'Vault',
-            asset: v.asset ?? v.underlyingSymbol,
-            amountUSD: Number(v.valueUsd ?? v.amountUsd ?? 0),
-            apy: v.apy ? Number(v.apy) * 100 : 0,
-            netValueUSD: Number(v.valueUsd ?? v.amountUsd ?? 0),
-          }))
+  const paddedAddr = addr.slice(2).padStart(64, '0')
+
+  try {
+    // Step 1: Get all Lagoon vaults on Monad
+    const res = await fetch('https://app.lagoon.finance/api/vaults?chainId=143', {
+      signal: AbortSignal.timeout(8_000), cache: 'no-store',
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    const vaults: any[] = data?.vaults ?? data ?? []
+    if (vaults.length === 0) return []
+
+    // Step 2: Batch balanceOf for all vaults
+    const balCalls = vaults.map((v: any, i: number) => ethCall(v.address, '0x70a08231' + paddedAddr, i))
+    const balResults = await rpcBatch(balCalls)
+
+    // Step 3: For vaults with balance, fetch sharePrice via totalAssets/totalSupply
+    const positions: any[] = []
+    for (let i = 0; i < vaults.length; i++) {
+      const v = vaults[i]
+      const shares = decodeUint(balResults.find((r: any) => r.id === i)?.result ?? '0x')
+      if (shares === 0n) continue
+
+      // Get totalAssets and totalSupply to compute share price
+      const [taRes, tsRes] = await rpcBatch([
+        ethCall(v.address, '0x01e1d114', 500), // totalAssets()
+        ethCall(v.address, '0x18160ddd', 501), // totalSupply()
+      ])
+      const totalAssets = decodeUint(taRes?.result ?? '0x')
+      const totalSupply = decodeUint(tsRes?.result ?? '0x')
+      const decimals = Number(v.decimals ?? 18)
+      const shareFloat = Number(shares) / Math.pow(10, decimals)
+      let amountUSD = 0
+      if (totalSupply > 0n) {
+        const ratio = Number(totalAssets) / Number(totalSupply)
+        amountUSD = shareFloat * ratio // underlying tokens, assume ≈ $1 for stables
       }
-    } catch { /* try next */ }
-  }
-  return []
+      if (amountUSD < 0.01 && shareFloat < 0.001) continue
+
+      positions.push({
+        protocol: 'Lagoon', type: 'vault', logo: '🏝️',
+        url: `https://app.lagoon.finance/vault/143/${v.address}`, chain: 'Monad',
+        label: v.name ?? v.symbol ?? 'Lagoon Vault',
+        asset: v.symbol,
+        amountUSD,
+        apy: v.apy ? Number(v.apy) * 100 : 0,
+        netValueUSD: amountUSD,
+      })
+    }
+    return positions
+  } catch { return [] }
 }
 
 // ─── RENZO (ezETH on Monad) ───────────────────────────────────────────────────
@@ -785,9 +810,11 @@ async function fetchEulerV2(user: string): Promise<any[]> {
 // ─── MIDAS RWA ────────────────────────────────────────────────────────────────
 // Tokenized T-Bills (mTBILL) and Basis trading (mBASIS). Price ≈ $1 (treasury peg).
 // Contract addresses on Monad mainnet (from DefiLlama $7.11M TVL tracking)
-const MIDAS_TOKENS = [
-  { address: '0x8a0e8e76A5c7Cd21deb5A0975eCb8C7C0bC1d7e5', symbol: 'mTBILL', decimals: 18, apy: 4.8 },
-  { address: '0x2e3421dEB8B0D640a2E3A9f4e2591B01A43e96F7', symbol: 'mBASIS', decimals: 18, apy: 7.2 },
+// TODO: Find correct Midas contract addresses on Monad mainnet
+// Current addresses return totalSupply = 0 — contracts are wrong or not deployed
+// Check: https://midas.app or MonadScan for mTBILL/mBASIS deployments
+const MIDAS_TOKENS: { address: string; symbol: string; decimals: number; apy: number }[] = [
+  // Addresses to be confirmed — leaving empty until correct addresses found
 ]
 async function fetchMidas(user: string): Promise<any[]> {
   try {

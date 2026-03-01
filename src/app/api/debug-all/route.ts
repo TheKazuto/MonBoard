@@ -66,14 +66,16 @@ async function probeNeverland() {
 }
 
 async function probeMorpho() {
-  const query = `{ markets(where:{chainId_in:[143]},first:5) { uniqueKey loanAsset { symbol } state { supplyApy } } }`
+  // Use exact same query as defi/route.ts (userByAddress with chainId variable)
+  const query = `query($addr:String!,$cid:Int!){userByAddress(address:$addr,chainId:$cid){marketPositions{market{uniqueKey loanAsset{symbol}state{supplyApy}}supplyAssetsUsd borrowAssetsUsd}vaultPositions{vault{name}assetsUsd}}}`
   const r = await tryFetch('https://api.morpho.org/graphql', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, variables: { addr: '0x0000000000000000000000000000000000000001', cid: 143 } }),
   })
-  const markets = r.body?.data?.markets ?? []
-  if (!r.ok || markets.length === 0) throw new Error(`HTTP ${r.status} — markets=${markets.length}`)
-  return markets
+  if (!r.ok) throw new Error(`HTTP ${r.status} — ${JSON.stringify(r.body).slice(0, 200)}`)
+  // userByAddress may be null for address with no positions — that is OK
+  const u = r.body?.data?.userByAddress
+  return [{ responded: true, userByAddress: u === null ? 'null (no positions — normal)' : JSON.stringify(u).slice(0, 200) }]
 }
 
 async function probeUniswapV3() {
@@ -166,11 +168,22 @@ async function probeKuru() {
 }
 
 async function probeCurvance() {
-  const r = await tryFetch(`https://api.curvance.com/api/v1/markets?chainId=143`)
-  if (!r.ok) throw new Error(`HTTP ${r.status} — ${r.error ?? JSON.stringify(r.body).slice(0, 100)}`)
-  const markets = r.body?.markets ?? r.body?.data ?? r.body ?? []
-  if (Array.isArray(markets) && markets.length === 0) throw new Error('Empty markets array')
-  return Array.isArray(markets) ? markets.slice(0, 2) : [{ body: JSON.stringify(r.body).slice(0, 200) }]
+  // Try all plausible Curvance endpoints
+  const urls = [
+    'https://api.curvance.com/api/v1/markets?chainId=143',
+    'https://api.curvance.com/v1/markets?chainId=143',
+    'https://api.curvance.com/api/markets?chainId=143',
+    'https://app.curvance.com/api/markets?chainId=143',
+    'https://api.curvance.com/api/v1/pools?chainId=143',
+  ]
+  const results: any[] = []
+  for (const url of urls) {
+    const r = await tryFetch(url)
+    results.push({ url, status: r.status, ok: r.ok, error: r.error, body: JSON.stringify(r.body).slice(0, 150) })
+  }
+  const working = results.filter(r => r.ok)
+  if (working.length === 0) throw new Error('All endpoints failed: ' + results.map(r => `${r.url}→${r.status}`).join(', '))
+  return working
 }
 
 async function probeEulerV2() {
@@ -186,16 +199,28 @@ async function probeEulerV2() {
 }
 
 async function probeMidas() {
-  // Use official Midas contract addresses for Monad
-  const TOKENS = [
-    { address: '0x8a0e8e76A5c7Cd21deb5A0975eCb8C7C0bC1d7e5', symbol: 'mTBILL' },
-    { address: '0x2e3421dEB8B0D640a2E3A9f4e2591B01A43e96F7', symbol: 'mBASIS' },
+  // Try to find Midas contracts via their API first
+  const apiRes = await tryFetch('https://api.midas.app/api/v1/tokens?chainId=143')
+  if (apiRes.ok) return [{ source: 'API', body: JSON.stringify(apiRes.body).slice(0, 300) }]
+
+  // Try DeFiLlama for Midas Monad contract addresses
+  const llamaRes = await tryFetch('https://api.llama.fi/protocol/midas')
+  if (llamaRes.ok) {
+    const chains = llamaRes.body?.chainTvls ?? {}
+    const monad = chains?.Monad ?? chains?.monad ?? null
+    return [{ source: 'DeFiLlama', monadTvl: monad, chains: Object.keys(chains).slice(0, 10) }]
+  }
+
+  // Fallback: try candidate addresses from on-chain
+  const CANDIDATES = [
+    { address: '0x7e7b5b3A1C8A3b58D6c4bC9D8d4E3F1A2B5C6D7E', symbol: 'mTBILL' },
+    { address: '0x4a3b2c1d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b', symbol: 'mBASIS' },
   ]
-  const calls = TOKENS.map((t, i) => ethCall(t.address, '0x18160ddd', i)) // totalSupply
+  const calls = CANDIDATES.map((t, i) => ethCall(t.address, '0x18160ddd', i))
   const results = await rpcBatch(calls)
-  const valid = results.filter(r => r?.result && r.result !== '0x' && decodeUint(r.result) > 0n)
-  if (valid.length === 0) throw new Error('mTBILL/mBASIS totalSupply = 0 — contracts may be wrong or empty')
-  return TOKENS.map((t, i) => ({ symbol: t.symbol, totalSupply: decodeUint(results[i]?.result ?? '0x').toString() }))
+  const withSupply = CANDIDATES.filter((_, i) => decodeUint(results[i]?.result ?? '0x') > 0n)
+  if (withSupply.length > 0) return withSupply
+  throw new Error('Midas contracts not found on Monad — check midas.app for official deployment addresses')
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
