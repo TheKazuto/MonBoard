@@ -47,18 +47,26 @@ function rayToApr(hex: string, wordIndex: number): number {
 }
 
 // ─── MORPHO — markets (lend) + vaults ────────────────────────────────────────
+// APY → APR conversion (daily compounding assumed)
+// APR = 365 × ((1 + APY)^(1/365) - 1)
+// For small values APY ≈ APR, but Morpho returns raw APY from the contract
+function apyToApr(apy: number): number {
+  if (apy <= 0) return 0
+  return 365 * (Math.pow(1 + apy, 1 / 365) - 1)
+}
+
 async function fetchMorpho(): Promise<AprEntry[]> {
   // GraphQL confirmed at api.morpho.org/graphql for Monad (chainId 143)
-  // Fields added: address (for direct links), totalAssets (for TVL sorting),
-  //               whitelisted filter (exclude empty/inactive markets)
+  // Note: removed whitelisted filter — not supported on Monad schema, breaks query
+  // supplyApy/netApy are returned as APY (not APR) — converted below
   const query = `{
-    markets(where:{chainId_in:[143], whitelisted:true}, first:100, orderBy:SupplyAssetsUsd, orderDirection:Desc) {
+    markets(where:{chainId_in:[143]}, first:100, orderBy:SupplyAssetsUsd, orderDirection:Desc) {
       uniqueKey
       loanAsset { symbol }
       collateralAsset { symbol }
       state { supplyApy borrowApy supplyAssetsUsd }
     }
-    vaults(where:{chainId_in:[143], whitelisted:true}, first:50, orderBy:TotalAssetsUsd, orderDirection:Desc) {
+    vaults(where:{chainId_in:[143]}, first:50, orderBy:TotalAssetsUsd, orderDirection:Desc) {
       address
       name
       symbol
@@ -77,12 +85,13 @@ async function fetchMorpho(): Promise<AprEntry[]> {
     const out: AprEntry[] = []
 
     for (const m of data?.data?.markets ?? []) {
-      const supplyApr = Number(m.state?.supplyApy ?? 0) * 100
-      const loanSym  = m.loanAsset?.symbol ?? '?'
-      const collSym  = m.collateralAsset?.symbol
+      // supplyApy from API is already a decimal (e.g. 0.05 = 5%) — convert APY→APR
+      const supplyApy = Number(m.state?.supplyApy ?? 0)
+      const supplyApr = apyToApr(supplyApy) * 100 // to percent
+      const loanSym   = m.loanAsset?.symbol ?? '?'
+      const collSym   = m.collateralAsset?.symbol
       if (supplyApr < 0.01) continue
       const tokens = collSym ? [collSym, loanSym] : [loanSym]
-      // Link directly to this market using uniqueKey
       const url = m.uniqueKey
         ? `https://app.morpho.org/monad/market?id=${m.uniqueKey}`
         : 'https://app.morpho.org/monad'
@@ -93,10 +102,11 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       })
     }
     for (const v of data?.data?.vaults ?? []) {
-      const netApr = Number(v.state?.netApy ?? 0) * 100
+      // netApy from API is a decimal — convert APY→APR
+      const netApy = Number(v.state?.netApy ?? 0)
+      const netApr = apyToApr(netApy) * 100 // to percent
       const sym    = v.asset?.symbol ?? '?'
       if (netApr < 0.01) continue
-      // Link directly to this vault using its address
       const url = v.address
         ? `https://app.morpho.org/monad/vault?address=${v.address}`
         : 'https://app.morpho.org/monad'
