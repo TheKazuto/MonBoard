@@ -476,7 +476,7 @@ async function fetchUniswapV3(): Promise<AprEntry[]> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' },
       body: JSON.stringify({ query: `{
-        topV3Pools(chain: MONAD, first: 30) {
+        topV3Pools(chain: MONAD, first: 100) {
           address feeTier
           token0 { symbol }
           token1 { symbol }
@@ -497,7 +497,7 @@ async function fetchUniswapV4(): Promise<AprEntry[]> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' },
       body: JSON.stringify({ query: `{
-        topV4Pools(chain: MONAD, first: 30) {
+        topV4Pools(chain: MONAD, first: 100) {
           poolId feeTier
           token0 { symbol }
           token1 { symbol }
