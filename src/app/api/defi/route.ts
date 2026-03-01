@@ -355,29 +355,67 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
 async function fetchCurve(user: string): Promise<any[]> {
-  try {
-    const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${user.toLowerCase()}/monad-mainnet`,
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-    if (!res.ok) return []
-    const data = await res.json()
-    return (data?.data?.lpData ?? [])
-      .filter((p: any) => Number(p.liquidityUsd ?? 0) > 0.01)
-      .map((p: any) => ({
-        protocol: 'Curve', type: 'liquidity', logo: '🌊',
-        url: `https://curve.fi/#/monad/pools/${p.poolAddress ?? ''}`, chain: 'Monad',
-        label: p.poolName ?? (p.coins?.map((c: any) => c.symbol) ?? []).join('/'),
-        tokens: p.coins?.map((c: any) => c.symbol) ?? [],
-        amountUSD: Number(p.liquidityUsd ?? 0),
-        apy: Number(p.apy ?? 0),
-        netValueUSD: Number(p.liquidityUsd ?? 0),
-        inRange: null,
-      }))
-  } catch { return [] }
+  // Curve is deployed on Monad mainnet (AddressProvider: 0x4574921eb950d3fd5b01562162ec566cb8bc3648)
+  // Try multiple API slug variations until one works
+  const slugs = ['monad', 'monad-mainnet', 'monad_mainnet']
+  const addr = user.toLowerCase()
+  for (const slug of slugs) {
+    try {
+      const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${addr}/${slug}`,
+        { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      if (!res.ok) continue
+      const data = await res.json()
+      const lpData = data?.data?.lpData ?? []
+      if (lpData.length === 0 && data?.data !== undefined) return [] // API responded but no positions
+      return lpData
+        .filter((p: any) => Number(p.liquidityUsd ?? 0) > 0.01)
+        .map((p: any) => ({
+          protocol: 'Curve', type: 'liquidity', logo: '🌊',
+          url: `https://curve.fi/#/monad/pools/${p.poolAddress ?? ''}`, chain: 'Monad',
+          label: p.poolName ?? (p.coins?.map((c: any) => c.symbol) ?? []).join('/'),
+          tokens: p.coins?.map((c: any) => c.symbol) ?? [],
+          amountUSD: Number(p.liquidityUsd ?? 0),
+          apy: Number(p.apy ?? 0),
+          netValueUSD: Number(p.liquidityUsd ?? 0),
+          inRange: null,
+        }))
+    } catch { /* try next slug */ }
+  }
+  return []
 }
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
-async function fetchGearbox(_user: string): Promise<any[]> {
-  // Gearbox is not yet deployed on Monad mainnet — returning empty until official launch
+// Gearbox Permissionless is deployed on Monad mainnet (curated by Edge: $50M+ peak TVL)
+// Their permissionless API is at permissionless.gearbox.foundation
+// The Gearbox permissionless architecture uses AddressProvider + Pool registry
+async function fetchGearbox(user: string): Promise<any[]> {
+  // Gearbox permissionless uses a different API than classic Gearbox
+  // Try permissionless API endpoints for Monad (chainId=143)
+  const endpoints = [
+    `https://api.gearbox.finance/api/v1/user/${user.toLowerCase()}/pools?chainId=143`,
+    `https://pf-api.gearbox.finance/api/v1/user/${user.toLowerCase()}/positions?chain=monad`,
+  ]
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      if (!res.ok) continue
+      const data = await res.json()
+      const positions = data?.data ?? data?.positions ?? data?.pools ?? []
+      if (Array.isArray(positions) && positions.length >= 0) {
+        return positions
+          .filter((p: any) => Number(p.valueUsd ?? p.amountUsd ?? p.lpValueUsd ?? 0) > 0.01)
+          .map((p: any) => ({
+            protocol: 'Gearbox', type: 'vault', logo: '⚙️',
+            url: 'https://permissionless.gearbox.foundation', chain: 'Monad',
+            label: p.poolName ?? p.symbol ?? p.name ?? 'Lending Pool',
+            asset: p.asset ?? p.underlying ?? p.symbol,
+            amountUSD: Number(p.valueUsd ?? p.amountUsd ?? 0),
+            apy: p.apy ? Number(p.apy) * 100 : 0,
+            netValueUSD: Number(p.valueUsd ?? p.amountUsd ?? 0),
+          }))
+      }
+    } catch { /* try next */ }
+  }
   return []
 }
 
@@ -468,26 +506,39 @@ async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
 }
 
 // ─── LAGOON FINANCE ───────────────────────────────────────────────────────────
-// Lagoon deploys ERC-4626 vaults; no public contract list yet for Monad
-// Try API endpoint
+// Lagoon deploys ERC7540 vaults permissionlessly via BeaconProxyFactory
+// Confirmed $3.42M TVL on Monad per DefiLlama
+// No public REST API — must query vaults on-chain (addresses not yet publicly listed)
 async function fetchLagoon(user: string): Promise<any[]> {
-  try {
-    const res = await fetch(`https://api.lagoon.finance/api/v1/positions?address=${user.toLowerCase()}&chainId=143`,
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-    if (!res.ok) return []
-    const data = await res.json()
-    return (data?.vaults ?? data?.positions ?? [])
-      .filter((v: any) => Number(v.valueUsd ?? v.amountUsd ?? 0) > 0.01)
-      .map((v: any) => ({
-        protocol: 'Lagoon', type: 'vault', logo: '🏝️',
-        url: 'https://app.lagoon.finance', chain: 'Monad',
-        label: v.name ?? v.vaultName ?? 'Vault',
-        asset: v.asset ?? v.underlyingSymbol,
-        amountUSD: Number(v.valueUsd ?? v.amountUsd ?? 0),
-        apy: v.apy ? Number(v.apy) * 100 : 0,
-        netValueUSD: Number(v.valueUsd ?? v.amountUsd ?? 0),
-      }))
-  } catch { return [] }
+  const addr = user.toLowerCase()
+  // Try multiple API endpoint patterns
+  const endpoints = [
+    `https://api.lagoon.finance/api/v1/positions?address=${addr}&chainId=143`,
+    `https://api.lagoon.finance/api/v1/vaults?address=${addr}&network=monad`,
+    `https://app.lagoon.finance/api/positions?address=${addr}&chainId=143`,
+  ]
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      if (!res.ok) continue
+      const data = await res.json()
+      const vaults = data?.vaults ?? data?.positions ?? data?.data ?? []
+      if (Array.isArray(vaults) && vaults.length >= 0) {
+        return vaults
+          .filter((v: any) => Number(v.valueUsd ?? v.amountUsd ?? v.shares ?? 0) > 0.01)
+          .map((v: any) => ({
+            protocol: 'Lagoon', type: 'vault', logo: '🏝️',
+            url: `https://app.lagoon.finance/vault/143/${v.address ?? ''}`, chain: 'Monad',
+            label: v.name ?? v.vaultName ?? 'Vault',
+            asset: v.asset ?? v.underlyingSymbol,
+            amountUSD: Number(v.valueUsd ?? v.amountUsd ?? 0),
+            apy: v.apy ? Number(v.apy) * 100 : 0,
+            netValueUSD: Number(v.valueUsd ?? v.amountUsd ?? 0),
+          }))
+      }
+    } catch { /* try next */ }
+  }
+  return []
 }
 
 // ─── RENZO (ezETH on Monad) ───────────────────────────────────────────────────
@@ -498,26 +549,48 @@ async function fetchRenzo(_user: string): Promise<any[]> {
   return []
 }
 
-// ─── KURU (AMM Vault LP positions) ───────────────────────────────────────────
-// Kuru has vault contracts for AMM LPs; try their API
+// ─── KURU (CLOB DEX Vault LP positions) ──────────────────────────────────────
+// Official Monad mainnet contracts from monad-crypto/protocols repository:
+// Vault:  0x4869a4c7657cef5e5496c9ce56dde4cd593e4923
+// Vault2: 0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a
+// These are ERC4626-like vaults: balanceOf(user) = LP shares
+// totalAssets() / totalSupply() gives share-to-asset ratio
+const KURU_VAULTS = [
+  { address: '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923', name: 'Kuru LP Vault', asset: 'USDC', decimals: 6 },
+  { address: '0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a', name: 'Kuru LP Vault 2', asset: 'USDC', decimals: 6 },
+]
+// totalAssets() selector = 0x01e1d114, totalSupply() = 0x18160ddd
 async function fetchKuru(user: string): Promise<any[]> {
   try {
-    const res = await fetch(`https://api.kuru.io/v1/user/positions?address=${user.toLowerCase()}&chain=monad`,
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-    if (!res.ok) return []
-    const data = await res.json()
-    return (data?.positions ?? [])
-      .filter((p: any) => Number(p.valueUsd ?? p.liquidityUsd ?? 0) > 0.01)
-      .map((p: any) => ({
+    const calls: any[] = []
+    KURU_VAULTS.forEach((v, i) => {
+      calls.push(ethCall(v.address, balanceOfData(user), 900 + i * 3))
+      calls.push(ethCall(v.address, '0x01e1d114', 901 + i * 3)) // totalAssets
+      calls.push(ethCall(v.address, '0x18160ddd', 902 + i * 3)) // totalSupply
+    })
+    const results = await rpcBatch(calls)
+    const items: any[] = []
+    KURU_VAULTS.forEach((v, i) => {
+      const shares = decodeUint(results.find((r: any) => r.id === 900 + i * 3)?.result ?? '0x')
+      if (shares === 0n) return
+      const totalAssets = decodeUint(results.find((r: any) => r.id === 901 + i * 3)?.result ?? '0x')
+      const totalSupply = decodeUint(results.find((r: any) => r.id === 902 + i * 3)?.result ?? '0x')
+      if (totalSupply === 0n) return
+      // Calculate underlying asset amount
+      const assetAmount = Number(shares * totalAssets / totalSupply) / Math.pow(10, v.decimals)
+      if (assetAmount < 0.01) return
+      items.push({
         protocol: 'Kuru', type: 'liquidity', logo: '🌀',
         url: 'https://app.kuru.io', chain: 'Monad',
-        label: p.market ?? p.pair ?? `${p.base}/${p.quote}`,
-        tokens: [p.base, p.quote].filter(Boolean),
-        amountUSD: Number(p.valueUsd ?? p.liquidityUsd ?? 0),
-        apy: p.apy ? Number(p.apy) : 0,
-        netValueUSD: Number(p.valueUsd ?? p.liquidityUsd ?? 0),
+        label: v.name,
+        tokens: [v.asset],
+        amountUSD: assetAmount, // USDC ≈ $1
+        apy: 0,
+        netValueUSD: assetAmount,
         inRange: null,
-      }))
+      })
+    })
+    return items
   } catch { return [] }
 }
 

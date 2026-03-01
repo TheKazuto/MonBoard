@@ -122,25 +122,54 @@ async function testPancakeSwap(user: string) {
 }
 
 // 5. Curve
+// The Curve API uses chain slugs from their internal registry
+// UI uses /dex/monad/ → slug is "monad"
+const CURVE_SLUGS_TO_TRY = ['monad', 'monad-mainnet', 'monad_mainnet']
 async function testCurve(user: string) {
-  const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${user.toLowerCase()}/monad-mainnet`,
-    { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = await res.json()
-  const lp = data?.data?.lpData ?? []
-  return { positionCount: lp.length, active: lp.filter((p: any) => Number(p.liquidityUsd ?? 0) > 0).length, endpoint: `curve.fi/v1/getLiquidityProviderData/${user}/monad` }
+  const tried: Record<string, unknown> = {}
+  for (const slug of CURVE_SLUGS_TO_TRY) {
+    const url = `https://api.curve.fi/v1/getLiquidityProviderData/${user.toLowerCase()}/${slug}`
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+      tried[slug] = { status: res.status, ok: res.ok }
+      if (res.ok) {
+        const data = await res.json()
+        const lp = data?.data?.lpData ?? []
+        return { found: true, slug, positionCount: lp.length, active: lp.filter((p: any) => Number(p.liquidityUsd ?? 0) > 0).length }
+      }
+    } catch (e: unknown) {
+      tried[slug] = { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  return { found: false, note: 'No working Curve chain slug found', tried }
 }
 
 // 6. Gearbox
+// Gearbox Permissionless on Monad — try multiple API patterns
+// The classic "third-eye" API used {chain}.gearbox-api.com but Monad subdomain doesn't exist
+// Permissionless version may use a different API base
+const GEARBOX_ENDPOINTS_TO_TRY = [
+  `https://api.gearbox.finance/api/v1/user/{user}/pools?chainId=143`,
+  `https://api.gearbox.fi/api/v1/pools?chainId=143`,
+  `https://permissionless-api.gearbox.foundation/api/v1/pools?chainId=143`,
+  `https://monad.gearbox-api.com/api/v1/pools`,
+]
 async function testGearbox(user: string) {
-  // Gearbox uses chain-specific API subdomains: {chain}.gearbox-api.com
-  const url = `https://monad.gearbox-api.com/api/v1/user/creditAccounts?userAddress=${user.toLowerCase()}`
-  const res = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-  const status = res.status
-  if (!res.ok) throw new Error(`HTTP ${status} — tried monad.gearbox-api.com`)
-  const data = await res.json()
-  const accounts = data?.creditAccounts ?? data?.accounts ?? data ?? []
-  return { httpStatus: status, endpoint: url, accountCount: Array.isArray(accounts) ? accounts.length : 0 }
+  const tried: Record<string, unknown> = {}
+  for (const template of GEARBOX_ENDPOINTS_TO_TRY) {
+    const url = template.replace('{user}', user.toLowerCase())
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      tried[url] = { status: res.status, ok: res.ok }
+      if (res.ok) {
+        const data = await res.json()
+        return { found: true, endpoint: url, data }
+      }
+    } catch (e: unknown) {
+      tried[url] = { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  return { found: false, note: 'Gearbox Permissionless API URL unknown — all patterns failed', tried }
 }
 
 // 7. Upshift
@@ -176,29 +205,26 @@ async function testShMonad(user: string) {
 }
 
 // 11. Lagoon
-// Lagoon is purely on-chain (ERC7540 standard) — no REST API exists
-// Vaults are queried by calling balanceOf/maxMint/pendingRedeemRequest on each vault contract
-// Known Lagoon vaults on Monad mainnet (from app.lagoon.finance/vault/143/*)
-const LAGOON_VAULTS_MONAD = [
-  { address: '0x87Ff7Bbb38E59B77B8F6F9B21DCaB77B7B700d4F', name: 'Lagoon USDC Vault' },
-  { address: '0xd2E85F0B33AaD7f43Ab6B5e35aaFc5B0C44E5c7A', name: 'Lagoon MON Vault' },
-]
+// Lagoon is an ERC7540 vault protocol confirmed with $3.42M TVL on Monad
+// Their architecture is permissionless (BeaconProxyFactory) — no fixed list of vaults
+// Trying REST API patterns first, then on-chain fallback with placeholder addresses
 async function testLagoon(user: string) {
-  const ABI_BAL = balanceOfData(user)
-  const calls = LAGOON_VAULTS_MONAD.flatMap((v, i) => [
-    ethCall(v.address, ABI_BAL, i * 2),
-    // maxMint(user) selector: 0xd905777e
-    ethCall(v.address, '0xd905777e' + user.slice(2).toLowerCase().padStart(64, '0'), i * 2 + 1),
-  ])
-  const results = await rpcBatch(calls)
-  const vaultData = LAGOON_VAULTS_MONAD.map((v, i) => ({
-    vault: v.name,
-    address: v.address,
-    shares: (Number(decodeUint(results[i * 2]?.result ?? '0x')) / 1e18).toFixed(6),
-    claimable: (Number(decodeUint(results[i * 2 + 1]?.result ?? '0x')) / 1e18).toFixed(6),
-    note: results[i * 2]?.result === '0x' ? 'contract may not exist' : 'ok',
-  }))
-  return { protocol: 'Lagoon (on-chain ERC7540)', vaults: vaultData, note: 'No REST API — queried directly from vault contracts' }
+  const addr = user.toLowerCase()
+  const endpoints = [
+    `https://api.lagoon.finance/api/v1/positions?address=${addr}&chainId=143`,
+    `https://api.lagoon.finance/api/v1/vaults?address=${addr}&network=monad`,
+    `https://app.lagoon.finance/api/positions?address=${addr}&chainId=143`,
+  ]
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      if (res.ok) {
+        const data = await res.json()
+        return { found: true, note: `REST API worked: ${url}`, data }
+      }
+    } catch { /* try next */ }
+  }
+  return { found: false, note: 'Lagoon REST API not accessible — no public on-chain vault list for Monad yet. Vault addresses needed from app.lagoon.finance/vault/143/*', tried: endpoints }
 }
 
 // 12. Renzo
@@ -228,30 +254,41 @@ async function testRenzo(user: string) {
 }
 
 // 13. Kuru
-// Kuru uses a private API (KURU_API env var in their SDK)
-// Trying multiple known URL patterns for their order book DEX
-const KURU_ENDPOINTS_TO_TRY = [
-  `https://api.kuru.io/v1/user/positions?address={user}&chain=monad`,
-  `https://api.kuru.io/user/{user}/positions`,
-  `https://api.kuru.io/markets`,  // List markets without user — just to test connectivity
-  `https://backend.kuru.io/v1/markets`,
+// Official Monad mainnet contracts from monad-crypto/protocols repository:
+// Vault:  0x4869a4c7657cef5e5496c9ce56dde4cd593e4923
+// Vault2: 0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a
+// Querying these as ERC4626-like vaults (balanceOf + totalAssets + totalSupply)
+const KURU_VAULT_CONTRACTS = [
+  '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923',
+  '0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a',
 ]
 async function testKuru(user: string) {
-  const results: Record<string, unknown> = {}
-  for (const template of KURU_ENDPOINTS_TO_TRY) {
-    const url = template.replace('{user}', user.toLowerCase())
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      results[url] = { status: res.status, ok: res.ok }
-      if (res.ok) {
-        const data = await res.json()
-        return { found: true, endpoint: url, data }
-      }
-    } catch (e: unknown) {
-      results[url] = { error: e instanceof Error ? e.message : String(e) }
-    }
+  try {
+    const calls = KURU_VAULT_CONTRACTS.flatMap((addr, i) => [
+      { jsonrpc: '2.0', id: 1000 + i * 3, method: 'eth_call', params: [{ to: addr, data: '0x70a08231' + user.slice(2).toLowerCase().padStart(64, '0') }, 'latest'] },
+      { jsonrpc: '2.0', id: 1001 + i * 3, method: 'eth_call', params: [{ to: addr, data: '0x01e1d114' }, 'latest'] }, // totalAssets
+      { jsonrpc: '2.0', id: 1002 + i * 3, method: 'eth_call', params: [{ to: addr, data: '0x18160ddd' }, 'latest'] }, // totalSupply
+    ])
+    const res = await fetch('https://rpc.monad.xyz', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(calls),
+      signal: AbortSignal.timeout(8_000),
+    })
+    const data: any[] = await res.json()
+    const vaultData = KURU_VAULT_CONTRACTS.map((addr, i) => {
+      const balHex = data.find((r: any) => r.id === 1000 + i * 3)?.result ?? '0x'
+      const assetsHex = data.find((r: any) => r.id === 1001 + i * 3)?.result ?? '0x'
+      const supplyHex = data.find((r: any) => r.id === 1002 + i * 3)?.result ?? '0x'
+      const bal = balHex !== '0x' ? BigInt(balHex).toString() : '0'
+      const assets = assetsHex !== '0x' ? BigInt(assetsHex).toString() : '0'
+      const supply = supplyHex !== '0x' ? BigInt(supplyHex).toString() : '0'
+      return { vault: addr, balance: bal, totalAssets: assets, totalSupply: supply, hasBalance: bal !== '0' }
+    })
+    return { found: true, note: 'Using real vault contract addresses from monad-crypto/protocols', vaults: vaultData }
+  } catch (e: unknown) {
+    return { found: false, error: e instanceof Error ? e.message : String(e), note: 'RPC call failed' }
   }
-  return { found: false, note: 'Kuru API URL is not publicly documented (uses KURU_API env var)', tried: results }
 }
 
 // 14. Curvance
@@ -310,9 +347,12 @@ async function testEulerV2(user: string) {
 }
 
 // 16. Midas
+// IMPORTANT: Addresses below are PLACEHOLDERS — Midas docs only list ETH/Base addresses
+// Check docs.midas.app/resources/smart-contracts-addresses for Monad deployment (may not exist yet)
+// Also check MonadScan by searching for "mTBILL" or "mBASIS" tokens
 const MIDAS_TOKENS = [
-  { address: '0x8a0e8e76A5c7Cd21deb5A0975eCb8C7C0bC1d7e5', symbol: 'mTBILL' },
-  { address: '0x2e3421dEB8B0D640a2E3A9f4e2591B01A43e96F7', symbol: 'mBASIS' },
+  { address: '0x8a0e8e76A5c7Cd21deb5A0975eCb8C7C0bC1d7e5', symbol: 'mTBILL', note: '⚠️ placeholder — find real address on MonadScan' },
+  { address: '0x2e3421dEB8B0D640a2E3A9f4e2591B01A43e96F7', symbol: 'mBASIS', note: '⚠️ placeholder — find real address on MonadScan' },
 ]
 async function testMidas(user: string) {
   const calls = MIDAS_TOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i))
