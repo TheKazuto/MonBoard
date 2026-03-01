@@ -54,31 +54,36 @@ async function debugCurve(user: string) {
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
 
-  // Test every plausible APY/APR endpoint for Monad
+  // The APR (4.71% 3pool, 26.35% MON LSTs) must come from api.curve.finance/api/getPools
+  // which is different from api-core.curve.finance — test both and compare APR fields
   const aprEndpoints = [
-    `${BASE}/getPoolsApys/monad`,
-    `${BASE}/getPoolsApys/monad/factory-stable-ng`,
-    `${BASE}/getPoolsApys/monad/factory-twocrypto`,
-    `${BASE}/getSubgraphData/monad`,
-    `${BASE}/getVolumes/monad`,
-    `${BASE}/getStats/monad`,
-    `${BASE}/getGauges/monad`,
+    'https://api.curve.finance/api/getPools/monad/factory-stable-ng',
+    'https://api.curve.finance/api/getPools/monad/factory-twocrypto',
+    `${BASE}/getPools/monad/factory-stable-ng`,
     'https://api.curve.finance/api/getSubgraphData/monad',
     'https://api.curve.finance/api/getVolumes/monad',
-    'https://api.curve.finance/api/getStats/monad',
+    'https://api.curve.finance/api/getApys/monad',
+    'https://api.curve.finance/api/getPools/all/monad',
   ]
   const aprResults: Record<string, any> = {}
   for (const url of aprEndpoints) {
     const r = await tryFetch(url)
-    const key = url.replace('https://api-core.curve.finance/v1/', '').replace('https://api.curve.finance/api/', 'api/')
+    const key = url.replace('https://api-core.curve.finance/v1/', 'core/').replace('https://api.curve.finance/api/', 'api/')
+    const pools = r.body?.data?.poolData ?? []
+    // For getPools: extract APR-related fields from first pool with TVL
+    const bigPool = pools.find((p: any) => Number(p.usdTotal ?? 0) > 1000)
+    const aprSample = bigPool ? Object.fromEntries(
+      Object.entries(bigPool).filter(([k]) => /(apy|apr|volume|fee|baseApy|latestDaily)/i.test(k))
+    ) : undefined
     aprResults[key] = {
       status: r.status,
       ok: r.ok,
       error: r.error,
-      // Show top-level keys if successful
-      topKeys: r.ok && r.body ? Object.keys(r.body).slice(0, 10) : undefined,
-      // Show first item if it's an array or has a data array
-      sample: r.ok && r.body?.data ? (Array.isArray(r.body.data) ? r.body.data[0] : Object.keys(r.body.data).slice(0, 5)) : undefined,
+      poolCount: pools.length,
+      aprFieldsFromBigPool: aprSample,
+      bigPoolName: bigPool?.name,
+      topKeys: r.ok && r.body && pools.length === 0 ? Object.keys(r.body).slice(0, 8) : undefined,
+      rawDataSample: r.ok && r.body?.data && pools.length === 0 ? JSON.stringify(r.body.data).slice(0, 300) : undefined,
     }
   }
 
