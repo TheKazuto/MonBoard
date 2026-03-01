@@ -355,33 +355,85 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
 async function fetchCurve(user: string): Promise<any[]> {
-  // Curve is deployed on Monad mainnet (AddressProvider: 0x4574921eb950d3fd5b01562162ec566cb8bc3648)
-  // Try multiple API slug variations until one works
-  const slugs = ['monad', 'monad-mainnet', 'monad_mainnet']
+  // Curve on Monad mainnet confirmed via api-core.curve.finance
+  // Correct API base: api-core.curve.finance (NOT api.curve.fi)
+  // Correct slug: "monad"
+  // Pool types with confirmed data: factory-twocrypto, factory-tricrypto
+  const BASE = 'https://api-core.curve.finance/v1'
   const addr = user.toLowerCase()
-  for (const slug of slugs) {
-    try {
-      const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${addr}/${slug}`,
-        { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      if (!res.ok) continue
+
+  // Step 1: Try the LP data endpoint with the confirmed correct API/slug
+  try {
+    const res = await fetch(`${BASE}/getLiquidityProviderData/${addr}/monad`,
+      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
+    if (res.ok) {
       const data = await res.json()
       const lpData = data?.data?.lpData ?? []
-      if (lpData.length === 0 && data?.data !== undefined) return [] // API responded but no positions
-      return lpData
-        .filter((p: any) => Number(p.liquidityUsd ?? 0) > 0.01)
-        .map((p: any) => ({
-          protocol: 'Curve', type: 'liquidity', logo: '🌊',
-          url: `https://curve.fi/#/monad/pools/${p.poolAddress ?? ''}`, chain: 'Monad',
-          label: p.poolName ?? (p.coins?.map((c: any) => c.symbol) ?? []).join('/'),
-          tokens: p.coins?.map((c: any) => c.symbol) ?? [],
-          amountUSD: Number(p.liquidityUsd ?? 0),
-          apy: Number(p.apy ?? 0),
-          netValueUSD: Number(p.liquidityUsd ?? 0),
-          inRange: null,
-        }))
-    } catch { /* try next slug */ }
+      if (Array.isArray(lpData)) {
+        const positions = lpData
+          .filter((p: any) => Number(p.liquidityUsd ?? 0) > 0.01)
+          .map((p: any) => ({
+            protocol: 'Curve', type: 'liquidity', logo: '🌊',
+            url: `https://curve.finance/#/monad/pools/${p.poolAddress ?? ''}`, chain: 'Monad',
+            label: p.poolName ?? (p.coins?.map((c: any) => c.symbol) ?? []).join('/'),
+            tokens: p.coins?.map((c: any) => c.symbol) ?? [],
+            amountUSD: Number(p.liquidityUsd ?? 0),
+            apy: Number(p.apy ?? 0),
+            netValueUSD: Number(p.liquidityUsd ?? 0),
+            inRange: null,
+          }))
+        return positions // return even if empty — API works, user just has no positions
+      }
+    }
+  } catch { /* fall through to pool scan */ }
+
+  // Step 2: Fallback — scan known pool types and check user LP balances on-chain
+  // (if getLiquidityProviderData endpoint doesn't exist for Monad yet)
+  const poolTypes = ['factory-twocrypto', 'factory-tricrypto', 'factory-stable-ng']
+  const userPools: any[] = []
+
+  for (const poolType of poolTypes) {
+    try {
+      const res = await fetch(`${BASE}/getPools/monad/${poolType}`,
+        { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
+      if (!res.ok) continue
+      const data = await res.json()
+      const pools = data?.data?.poolData ?? []
+      for (const pool of pools) {
+        const lpTokenAddress = pool.lpTokenAddress ?? pool.address
+        if (!lpTokenAddress) continue
+        // Check user LP balance on-chain
+        try {
+          const rpcRes = await fetch('https://rpc.monad.xyz', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0', id: 1, method: 'eth_call',
+              params: [{ to: lpTokenAddress, data: '0x70a08231' + addr.slice(2).padStart(64, '0') }, 'latest'],
+            }),
+            signal: AbortSignal.timeout(4_000),
+          })
+          const rpc = await rpcRes.json()
+          const balance = rpc?.result && rpc.result !== '0x' ? BigInt(rpc.result) : 0n
+          if (balance > 0n) {
+            const coins = pool.coins?.map((c: any) => c.symbol) ?? []
+            userPools.push({
+              protocol: 'Curve', type: 'liquidity', logo: '🌊',
+              url: `https://curve.finance/#/monad/pools/${pool.address}`, chain: 'Monad',
+              label: pool.name ?? coins.join('/'),
+              tokens: coins,
+              amountUSD: Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0),
+              apy: Number(pool.gaugeCrvApy?.[0] ?? 0),
+              netValueUSD: 0, // would need price calculation
+              inRange: null,
+            })
+          }
+        } catch { /* skip this pool */ }
+      }
+    } catch { /* skip this pool type */ }
   }
-  return []
+
+  return userPools
 }
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
