@@ -44,7 +44,7 @@ export async function GET() {
   results.cake_factory_from_pm = cakeFactory
 
   // Step 3: verify factories — call owner() and numPools() on them
-  for (const [name, addr] of [['uni_factory', uniFactory], ['cake_factory', cakeFactory]]) {
+  for (const [name, addr] of [['uni_factory', uniFactory], ['cake_factory', cakeFactory]] as [string, string | null][]) {
     if (!addr) continue
     const code     = await rpcCall(10, 'eth_getCode', [addr, 'latest'])
     const owner    = await rpcCall(11, 'eth_call', [{ to: addr, data: '0x8da5b701' }, 'latest'])
