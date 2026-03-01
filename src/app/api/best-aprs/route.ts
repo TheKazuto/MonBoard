@@ -441,48 +441,72 @@ async function fetchRenzo(): Promise<AprEntry[]> {
   return []
 }
 
-// ─── UNISWAP V3 — top pools via Uniswap GraphQL ──────────────────────────────
+// ─── UNISWAP V3 + V4 — top pools via Uniswap GraphQL ─────────────────────────
+// Uses GraphQL aliases to fetch V3 and V4 in a single request
+// If V4 query fails (not yet supported), the V3 alias still returns data
+function parseUniPools(pools: any[], version: string): AprEntry[] {
+  const out: AprEntry[] = []
+  for (const p of pools) {
+    const tvl    = Number(p.totalLiquidity?.value ?? 0)
+    const vol24h = Number(p.cumulativeVolume?.value ?? 0)
+    const fee    = Number(p.feeTier ?? 0)  // e.g. 3000 = 0.3%
+    if (tvl < 100 || vol24h < 1) continue
+    // feeTier is in millionths (3000 = 0.3% = 3000/1_000_000)
+    const apr = (vol24h * (fee / 1_000_000)) / tvl * 365 * 100
+    if (apr < 0.01) continue
+    const t0 = p.token0?.symbol ?? '?'
+    const t1 = p.token1?.symbol ?? '?'
+    const tokens = [t0, t1]
+    const feeLabel = fee === 100 ? '0.01%' : fee === 500 ? '0.05%' : fee === 3000 ? '0.3%' : fee === 10000 ? '1%' : `${fee/10000}%`
+    out.push({
+      protocol: `Uniswap ${version}`, logo: '🦄', url: `https://app.uniswap.org/explore/pools/monad/${p.address}`,
+      tokens, label: `${t0}/${t1} ${feeLabel}`,
+      apr, type: 'pool', isStable: allStable(tokens),
+    })
+  }
+  return out
+}
+
 async function fetchUniswap(): Promise<AprEntry[]> {
   // chain: MONAD confirmed working — returns real mainnet pools
   // APR = (volume_24h × feeTier_pct) / TVL × 365 × 100
-  const query = `{
-    topV3Pools(chain: MONAD, first: 30) {
-      address feeTier
+  const GQL  = 'https://interface.gateway.uniswap.org/v1/graphql'
+  const HDRS = { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' }
+  const FIELDS = `address feeTier
       token0 { symbol }
       token1 { symbol }
       totalLiquidity { value }
-      cumulativeVolume(duration: DAY) { value }
-    }
-  }`
+      cumulativeVolume(duration: DAY) { value }`
+
   try {
-    const res = await fetch('https://interface.gateway.uniswap.org/v1/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' },
-      body: JSON.stringify({ query }),
+    // Try V3 + V4 combined first
+    const combined = `{
+      v3: topV3Pools(chain: MONAD, first: 30) { ${FIELDS} }
+      v4: topV4Pools(chain: MONAD, first: 30) { ${FIELDS} }
+    }`
+    const res = await fetch(GQL, {
+      method: 'POST', headers: HDRS,
+      body: JSON.stringify({ query: combined }),
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     const data = await res.json()
-    const pools = data?.data?.topV3Pools ?? []
-    const out: AprEntry[] = []
-    for (const p of pools) {
-      const tvl    = Number(p.totalLiquidity?.value ?? 0)
-      const vol24h = Number(p.cumulativeVolume?.value ?? 0)
-      const fee    = Number(p.feeTier ?? 0)  // e.g. 3000 = 0.3%
-      if (tvl < 100 || vol24h < 1) continue
-      // feeTier is in millionths (3000 = 0.3% = 3000/1_000_000)
-      const apr = (vol24h * (fee / 1_000_000)) / tvl * 365 * 100
-      if (apr < 0.01) continue
-      const t0 = p.token0?.symbol ?? '?'
-      const t1 = p.token1?.symbol ?? '?'
-      const tokens = [t0, t1]
-      const feeLabel = fee === 100 ? '0.01%' : fee === 500 ? '0.05%' : fee === 3000 ? '0.3%' : fee === 10000 ? '1%' : `${fee/10000}%`
-      out.push({
-        protocol: 'Uniswap V3', logo: '🦄', url: `https://app.uniswap.org/explore/pools/monad/${p.address}`,
-        tokens, label: `${t0}/${t1} ${feeLabel}`,
-        apr, type: 'pool', isStable: allStable(tokens),
-      })
+
+    // If no errors, parse both
+    if (!data.errors) {
+      const v3 = parseUniPools(data?.data?.v3 ?? [], 'V3')
+      const v4 = parseUniPools(data?.data?.v4 ?? [], 'V4')
+      return [...v3, ...v4].sort((a, b) => b.apr - a.apr)
     }
-    return out.sort((a, b) => b.apr - a.apr)
+
+    // If combined failed (e.g. topV4Pools not in schema), fallback to V3 only
+    const fallback = `{ topV3Pools(chain: MONAD, first: 30) { ${FIELDS} } }`
+    const res2 = await fetch(GQL, {
+      method: 'POST', headers: HDRS,
+      body: JSON.stringify({ query: fallback }),
+      signal: AbortSignal.timeout(10_000), cache: 'no-store',
+    })
+    const data2 = await res2.json()
+    return parseUniPools(data2?.data?.topV3Pools ?? [], 'V3')
   } catch { return [] }
 }
 
