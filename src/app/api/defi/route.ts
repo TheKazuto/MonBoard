@@ -355,85 +355,82 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 
 // ─── CURVE ────────────────────────────────────────────────────────────────────
 async function fetchCurve(user: string): Promise<any[]> {
-  // Curve on Monad mainnet confirmed via api-core.curve.finance
-  // Correct API base: api-core.curve.finance (NOT api.curve.fi)
-  // Correct slug: "monad"
-  // Pool types with confirmed data: factory-twocrypto, factory-tricrypto
+  // Curve on Monad mainnet — confirmed working:
+  //   API base : https://api-core.curve.finance/v1  (NOT api.curve.fi)
+  //   Slug     : "monad"
+  //   Pool types with data: factory-twocrypto (9), factory-stable-ng (17)
+  //   getLiquidityProviderData returns 404 for Monad → use on-chain balance check
   const BASE = 'https://api-core.curve.finance/v1'
   const addr = user.toLowerCase()
+  const paddedAddr = addr.slice(2).padStart(64, '0')
 
-  // Step 1: Try the LP data endpoint with the confirmed correct API/slug
-  try {
-    const res = await fetch(`${BASE}/getLiquidityProviderData/${addr}/monad`,
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-    if (res.ok) {
-      const data = await res.json()
-      const lpData = data?.data?.lpData ?? []
-      if (Array.isArray(lpData)) {
-        const positions = lpData
-          .filter((p: any) => Number(p.liquidityUsd ?? 0) > 0.01)
-          .map((p: any) => ({
-            protocol: 'Curve', type: 'liquidity', logo: '🌊',
-            url: `https://curve.finance/#/monad/pools/${p.poolAddress ?? ''}`, chain: 'Monad',
-            label: p.poolName ?? (p.coins?.map((c: any) => c.symbol) ?? []).join('/'),
-            tokens: p.coins?.map((c: any) => c.symbol) ?? [],
-            amountUSD: Number(p.liquidityUsd ?? 0),
-            apy: Number(p.apy ?? 0),
-            netValueUSD: Number(p.liquidityUsd ?? 0),
-            inRange: null,
-          }))
-        return positions // return even if empty — API works, user just has no positions
-      }
-    }
-  } catch { /* fall through to pool scan */ }
+  // Step 1: Fetch all pools from both active pool types in parallel
+  const poolTypes = ['factory-twocrypto', 'factory-stable-ng']
+  const poolFetches = await Promise.all(
+    poolTypes.map(t =>
+      fetch(`${BASE}/getPools/monad/${t}`, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null)
+    )
+  )
 
-  // Step 2: Fallback — scan known pool types and check user LP balances on-chain
-  // (if getLiquidityProviderData endpoint doesn't exist for Monad yet)
-  const poolTypes = ['factory-twocrypto', 'factory-tricrypto', 'factory-stable-ng']
-  const userPools: any[] = []
+  // Flatten all pools into one list with metadata
+  const allPools: any[] = []
+  for (const data of poolFetches) {
+    const pools = data?.data?.poolData ?? []
+    allPools.push(...pools)
+  }
+  if (allPools.length === 0) return []
 
-  for (const poolType of poolTypes) {
-    try {
-      const res = await fetch(`${BASE}/getPools/monad/${poolType}`,
-        { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-      if (!res.ok) continue
-      const data = await res.json()
-      const pools = data?.data?.poolData ?? []
-      for (const pool of pools) {
-        const lpTokenAddress = pool.lpTokenAddress ?? pool.address
-        if (!lpTokenAddress) continue
-        // Check user LP balance on-chain
-        try {
-          const rpcRes = await fetch('https://rpc.monad.xyz', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              jsonrpc: '2.0', id: 1, method: 'eth_call',
-              params: [{ to: lpTokenAddress, data: '0x70a08231' + addr.slice(2).padStart(64, '0') }, 'latest'],
-            }),
-            signal: AbortSignal.timeout(4_000),
-          })
-          const rpc = await rpcRes.json()
-          const balance = rpc?.result && rpc.result !== '0x' ? BigInt(rpc.result) : 0n
-          if (balance > 0n) {
-            const coins = pool.coins?.map((c: any) => c.symbol) ?? []
-            userPools.push({
-              protocol: 'Curve', type: 'liquidity', logo: '🌊',
-              url: `https://curve.finance/#/monad/pools/${pool.address}`, chain: 'Monad',
-              label: pool.name ?? coins.join('/'),
-              tokens: coins,
-              amountUSD: Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0),
-              apy: Number(pool.gaugeCrvApy?.[0] ?? 0),
-              netValueUSD: 0, // would need price calculation
-              inRange: null,
-            })
-          }
-        } catch { /* skip this pool */ }
-      }
-    } catch { /* skip this pool type */ }
+  // Step 2: Batch ALL balanceOf calls in one RPC request (fast!)
+  const balanceCalls = allPools.map((pool, i) => ({
+    jsonrpc: '2.0',
+    id: i,
+    method: 'eth_call',
+    params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
+  }))
+
+  const rpcRes = await rpcBatch(balanceCalls, 10_000)
+
+  // Step 3: Build positions only for pools where user has balance
+  const positions: any[] = []
+  for (let i = 0; i < allPools.length; i++) {
+    const result = rpcRes.find((r: any) => r.id === i)?.result ?? '0x'
+    if (!result || result === '0x' || result === '0x' + '0'.repeat(64)) continue
+
+    const balanceRaw = BigInt(result)
+    if (balanceRaw === 0n) continue
+
+    const pool = allPools[i]
+    const totalSupplyRaw = BigInt(pool.totalSupply ?? '0')
+    const lpPrice = Number(pool.lpTokenPrice ?? 0)
+
+    // User's USD value = (userBalance / totalSupply) * poolUsdTotal
+    // Or simpler: userBalance (18 dec) * lpTokenPrice
+    const userBalanceFloat = Number(balanceRaw) / 1e18
+    const netValueUSD = lpPrice > 0
+      ? userBalanceFloat * lpPrice
+      : totalSupplyRaw > 0n
+        ? (Number(balanceRaw) / Number(totalSupplyRaw)) * Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0)
+        : 0
+
+    if (netValueUSD < 0.01) continue
+
+    const coins = pool.coins?.map((c: any) => c.symbol) ?? []
+    const poolId = pool.id ?? pool.address
+    positions.push({
+      protocol: 'Curve', type: 'liquidity', logo: '🌊',
+      url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`, chain: 'Monad',
+      label: pool.name ?? coins.join('/'),
+      tokens: coins,
+      amountUSD: netValueUSD,
+      apy: Number(pool.gaugeCrvApy?.[0] ?? 0),
+      netValueUSD,
+      inRange: null,
+    })
   }
 
-  return userPools
+  return positions
 }
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────

@@ -48,40 +48,61 @@ async function tryFetch(url: string): Promise<{ status: number; ok: boolean; bod
   }
 }
 
-// ─── CURVE: Test correct API (api-core.curve.finance) ─────────────────────────
+// ─── CURVE: Test final implementation ─────────────────────────────────────────
 async function debugCurve(user: string) {
   const BASE = 'https://api-core.curve.finance/v1'
+  const addr = user.toLowerCase()
+  const paddedAddr = addr.slice(2).padStart(64, '0')
 
-  // Test all confirmed endpoints from Network tab
-  const apiTests: Record<string, any> = {}
+  // Fetch both active pool types
+  const [twocrypto, stableNg] = await Promise.all([
+    tryFetch(`${BASE}/getPools/monad/factory-twocrypto`),
+    tryFetch(`${BASE}/getPools/monad/factory-stable-ng`),
+  ])
 
-  const endpoints = [
-    `${BASE}/getLiquidityProviderData/${user.toLowerCase()}/monad`,
-    `${BASE}/getPools/monad/factory-twocrypto`,
-    `${BASE}/getPools/monad/factory-tricrypto`,
-    `${BASE}/getPools/monad/factory-stable-ng`,
-    `${BASE}/getDeployment/monad`,
-    `${BASE}/getPlatforms`,
+  const allPools = [
+    ...(twocrypto.body?.data?.poolData ?? []),
+    ...(stableNg.body?.data?.poolData ?? []),
   ]
 
-  for (const url of endpoints) {
-    const r = await tryFetch(url)
-    const key = url.split('/').slice(-2).join('/')
-    if (r.ok && r.body) {
-      // For pool lists, show count
-      const poolData = r.body?.data?.poolData ?? r.body?.data?.lpData ?? null
-      apiTests[key] = {
-        status: r.status,
-        ok: true,
-        poolCount: Array.isArray(poolData) ? poolData.length : undefined,
-        sample: poolData ? poolData[0] : (typeof r.body === 'object' ? Object.keys(r.body).slice(0, 5) : r.body?.toString?.()?.slice(0, 200)),
-      }
-    } else {
-      apiTests[key] = { status: r.status, ok: false, error: r.error }
+  // Batch balanceOf for all pools
+  const balanceCalls = allPools.map((pool: any, i: number) => ({
+    jsonrpc: '2.0', id: i, method: 'eth_call',
+    params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
+  }))
+  const rpcResults = balanceCalls.length > 0 ? await rpcBatch(balanceCalls, 10_000) : []
+
+  const poolsWithBalance: any[] = []
+  const poolsChecked: any[] = []
+
+  for (let i = 0; i < allPools.length; i++) {
+    const pool = allPools[i]
+    const result = rpcResults.find((r: any) => r.id === i)?.result ?? '0x'
+    const balance = (!result || result === '0x') ? 0n : BigInt(result)
+    const lpPrice = Number(pool.lpTokenPrice ?? 0)
+    const userUsd = balance > 0n ? (Number(balance) / 1e18) * lpPrice : 0
+
+    const entry = {
+      name: pool.name,
+      address: pool.lpTokenAddress ?? pool.address,
+      tvl: pool.usdTotalExcludingBasePool?.toFixed(2),
+      lpPrice: lpPrice.toFixed(4),
+      userBalanceRaw: balance.toString(),
+      userUSD: userUsd.toFixed(4),
     }
+    poolsChecked.push(entry)
+    if (balance > 0n) poolsWithBalance.push(entry)
   }
 
-  return { apiTests, correctBase: BASE, correctSlug: 'monad' }
+  return {
+    totalPools: allPools.length,
+    twocryptoCount: twocrypto.body?.data?.poolData?.length ?? 0,
+    stableNgCount: stableNg.body?.data?.poolData?.length ?? 0,
+    userAddress: addr,
+    poolsWithBalance,
+    allPoolsChecked: poolsChecked,
+    note: poolsWithBalance.length === 0 ? 'User has no Curve LP positions' : `Found ${poolsWithBalance.length} positions`,
+  }
 }
 
 // ─── KURU: Deep contract introspection + event scan ───────────────────────────
