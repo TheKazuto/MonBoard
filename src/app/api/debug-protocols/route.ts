@@ -50,146 +50,86 @@ async function tryFetch(url: string): Promise<{ status: number; ok: boolean; bod
 
 // ─── CURVE: Find APR endpoint ─────────────────────────────────────────────────
 async function debugCurve(user: string) {
-  const BASE = 'https://api-core.curve.finance/v1'
-  const addr = user.toLowerCase()
-  const paddedAddr = addr.slice(2).padStart(64, '0')
+  const BASE       = 'https://api-core.curve.finance/v1'
+  const RPC        = 'https://rpc.monad.xyz'
+  const BLOCKS_24H = 195_000
+  const TE_CLASSIC = '0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140'
+  const TE_NG      = '0x143f1f8e861fbdeddd5b46e844b7d3ac7b86a122f36e8c463859ee6811b1f29c'
 
-  // APR is NOT in any Curve API for Monad.
-  // Calculate on-chain: baseAPR = ((vpNow / vp24hAgo)^365 - 1) * 100
-  // Monad ~1s/block → 24h ≈ 86400 blocks ago
-  const POOL_3POOL   = '0x942644106B073E30D72c2C5D7529D5C296ea91ab'
-  const POOL_MONLSTS = '0x74d80eE400D3026FDd2520265cC98300710b25D4'
-  const GET_VP       = '0xbb7b8b80' // get_virtual_price()
+  // Step 1: fetch pools + block
+  const [r1, r2, bnRes] = await Promise.all([
+    fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(RPC, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
+      signal: AbortSignal.timeout(4_000),
+    }).then(r => r.json()).catch(() => ({ result: '0x0' })),
+  ])
 
-  // Get current block number
-  const blockRes = await rpcBatch([{ jsonrpc: '2.0', id: 999, method: 'eth_blockNumber', params: [] }])
-  const currentBlock = Number(BigInt(blockRes[0]?.result ?? '0x0'))
-  const block24hAgo  = '0x' + Math.max(0, currentBlock - 86400).toString(16)
-  const block7dAgo   = '0x' + Math.max(0, currentBlock - 604800).toString(16)
+  const allPools: any[] = [...(r1?.data?.poolData ?? []), ...(r2?.data?.poolData ?? [])]
+  const livePools = allPools.filter((p: any) => Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0) > 100)
+  const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
+  const fromBlock = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
 
-  // Fetch virtual prices at 3 points in time for both pools
-  const vpCalls = [
-    { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: POOL_3POOL,   data: GET_VP }, 'latest']   },
-    { jsonrpc: '2.0', id: 2, method: 'eth_call', params: [{ to: POOL_3POOL,   data: GET_VP }, block24hAgo] },
-    { jsonrpc: '2.0', id: 3, method: 'eth_call', params: [{ to: POOL_3POOL,   data: GET_VP }, block7dAgo]  },
-    { jsonrpc: '2.0', id: 4, method: 'eth_call', params: [{ to: POOL_MONLSTS, data: GET_VP }, 'latest']   },
-    { jsonrpc: '2.0', id: 5, method: 'eth_call', params: [{ to: POOL_MONLSTS, data: GET_VP }, block24hAgo] },
-    { jsonrpc: '2.0', id: 6, method: 'eth_call', params: [{ to: POOL_MONLSTS, data: GET_VP }, block7dAgo]  },
+  // Step 2: test eth_getLogs
+  const logsRes = await fetch(RPC, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 999,
+      method: 'eth_getLogs',
+      params: [{ fromBlock, toBlock: 'latest', address: livePools.map((p: any) => p.address), topics: [[TE_CLASSIC, TE_NG]] }],
+    }),
+    signal: AbortSignal.timeout(15_000),
+  }).then(r => r.json()).catch((e: any) => ({ error: e.message }))
+
+  const logs: any[] = Array.isArray(logsRes?.result) ? logsRes.result : []
+
+  // Step 3: fee() for 3pool and MON LSTs
+  const TEST_POOLS = [
+    { name: '3pool',    address: '0x942644106B073E30D72c2C5D7529D5C296ea91ab' },
+    { name: 'MON LSTs', address: '0x74d80eE400D3026FDd2520265cC98300710b25D4' },
   ]
-  const vpRes = await rpcBatch(vpCalls, 12_000)
+  const feeCalls = TEST_POOLS.map((p, i) => ({ jsonrpc: '2.0', id: i, method: 'eth_call', params: [{ to: p.address, data: '0xddca3f43' }, 'latest'] }))
+  const vpNowCalls = TEST_POOLS.map((p, i) => ({ jsonrpc: '2.0', id: i+10, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, 'latest'] }))
+  const vpOldCalls = TEST_POOLS.map((p, i) => ({ jsonrpc: '2.0', id: i+20, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, fromBlock] }))
+  const rpcResults = await fetch(RPC, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify([...feeCalls, ...vpNowCalls, ...vpOldCalls]),
+    signal: AbortSignal.timeout(10_000),
+  }).then(r => r.json()).then((d: any) => Array.isArray(d) ? d : [d]).catch(() => [])
 
-  function calcApr(vpNow: string, vpOld: string, periods: number): number {
-    if (!vpNow || vpNow === '0x' || !vpOld || vpOld === '0x') return 0
+  const poolDebug = TEST_POOLS.map((p, i) => {
+    const feeRaw  = BigInt(rpcResults.find((r: any) => r.id === i)?.result ?? '0x0')
+    const feeRate = Number(feeRaw) / 1e10
+    const vpNow   = rpcResults.find((r: any) => r.id === i+10)?.result ?? '0x'
+    const vpOld   = rpcResults.find((r: any) => r.id === i+20)?.result ?? '0x'
+    let vpApr = 0
     try {
       const now = Number(BigInt(vpNow)) / 1e18
       const old = Number(BigInt(vpOld)) / 1e18
-      if (old <= 0 || now <= old) return 0
-      return (Math.pow(now / old, periods) - 1) * 100
-    } catch { return 0 }
-  }
-
-  const get = (id: number) => vpRes.find((r: any) => r.id === id)?.result ?? '0x'
-  const aprResults = {
-    currentBlock,
-    block24hAgo: currentBlock - 86400,
-    block7dAgo:  currentBlock - 604800,
-    pool3pool: {
-      address: POOL_3POOL,
-      vpNow:    get(1),
-      vp24hAgo: get(2),
-      vp7dAgo:  get(3),
-      apr24h:   calcApr(get(1), get(2), 365).toFixed(4) + '%',
-      apr7d:    calcApr(get(1), get(3), 52).toFixed(4) + '%',
-    },
-    poolMonLsts: {
-      address: POOL_MONLSTS,
-      vpNow:    get(4),
-      vp24hAgo: get(5),
-      vp7dAgo:  get(6),
-      apr24h:   calcApr(get(4), get(5), 365).toFixed(4) + '%',
-      apr7d:    calcApr(get(4), get(6), 52).toFixed(4) + '%',
-    },
-  }
-
-  // Fetch both active pool types
-  const [twocrypto, stableNg] = await Promise.all([
-    tryFetch(`${BASE}/getPools/monad/factory-twocrypto`),
-    tryFetch(`${BASE}/getPools/monad/factory-stable-ng`),
-  ])
-
-  const allPools = [
-    ...(twocrypto.body?.data?.poolData ?? []),
-    ...(stableNg.body?.data?.poolData ?? []),
-  ]
-
-  // Batch balanceOf for all pools
-  const balanceCalls = allPools.map((pool: any, i: number) => ({
-    jsonrpc: '2.0', id: i, method: 'eth_call',
-    params: [{ to: pool.lpTokenAddress ?? pool.address, data: '0x70a08231' + paddedAddr }, 'latest'],
-  }))
-  const rpcResults = balanceCalls.length > 0 ? await rpcBatch(balanceCalls, 10_000) : []
-
-  const poolsWithBalance: any[] = []
-  const poolsChecked: any[] = []
-
-  for (let i = 0; i < allPools.length; i++) {
-    const pool = allPools[i]
-    const result = rpcResults.find((r: any) => r.id === i)?.result ?? '0x'
-    const balance = (!result || result === '0x') ? 0n : BigInt(result)
-    const lpPrice = Number(pool.lpTokenPrice ?? 0)
-    const userUsd = balance > 0n ? (Number(balance) / 1e18) * lpPrice : 0
-
-    // Collect every APR/APY-related field
-    const aprFields: Record<string, any> = {}
-    for (const [k, v] of Object.entries(pool)) {
-      if (/(apy|apr|rate|yield|reward|crv|incentive)/i.test(k)) aprFields[k] = v
-    }
-
-    const entry = {
-      name: pool.name,
-      address: pool.lpTokenAddress ?? pool.address,
-      tvl: Number(pool.usdTotalExcludingBasePool ?? pool.usdTotal ?? 0).toFixed(2),
-      lpPrice: lpPrice.toFixed(4),
-      aprFields,
-      userBalanceRaw: balance.toString(),
-      userUSD: userUsd.toFixed(4),
-    }
-    poolsChecked.push(entry)
-    if (balance > 0n) poolsWithBalance.push(entry)
-  }
-
-  const firstPoolKeys = allPools[0] ? Object.keys(allPools[0]) : []
+      if (old > 0 && now > old) vpApr = (Math.pow(now / old, 365) - 1) * 100
+    } catch {}
+    const poolLogs = logs.filter((l: any) => l.address?.toLowerCase() === p.address.toLowerCase())
+    return { name: p.name, feeRate: feeRate.toFixed(6), feeRateRaw: feeRaw.toString(), vpApr: vpApr.toFixed(4) + '%', logsCount: poolLogs.length }
+  })
 
   return {
     totalPools: allPools.length,
-    twocryptoCount: twocrypto.body?.data?.poolData?.length ?? 0,
-    stableNgCount: stableNg.body?.data?.poolData?.length ?? 0,
-    userAddress: addr,
-    firstPoolAllKeys: firstPoolKeys,
-    aprEndpointResults: aprResults,   // ← where APR lives
-    poolsWithBalance,
-    allPoolsChecked: poolsChecked,
-    note: poolsWithBalance.length === 0 ? 'User has no Curve LP positions' : `Found ${poolsWithBalance.length} positions`,
+    livePools: livePools.length,
+    currentBlock,
+    fromBlock,
+    blocksRange: BLOCKS_24H,
+    logsRaw: logsRes?.error ?? `${logs.length} logs returned`,
+    logsError: logsRes?.error ?? null,
+    logsResult: Array.isArray(logsRes?.result) ? 'array' : typeof logsRes?.result,
+    poolDebug,
+    note: logs.length === 0
+      ? 'NO LOGS — eth_getLogs returned empty. Fallback to virtualPrice should activate.'
+      : `${logs.length} TokenExchange events found in last 24h`,
   }
 }
 
-// ─── KURU: Deep contract introspection + event scan ───────────────────────────
-// Decode full ABI-encoded string from eth_call result
-function decodeFullString(hex: string): string {
-  if (!hex || hex === '0x' || hex.length < 10) return ''
-  try {
-    const data = hex.startsWith('0x') ? hex.slice(2) : hex
-    const bytes = Buffer.from(data, 'hex')
-    if (bytes.length < 64) return ''
-    const offset = Number(BigInt('0x' + data.slice(0, 64)))
-    const lenStart = offset * 2
-    if (lenStart + 64 > data.length) return ''
-    const strLen = Number(BigInt('0x' + data.slice(lenStart, lenStart + 64)))
-    if (strLen === 0 || strLen > 500) return ''
-    const strHex = data.slice(lenStart + 64, lenStart + 64 + strLen * 2)
-    return Buffer.from(strHex, 'hex').toString('utf8').replace(/\0/g, '')
-  } catch { return '' }
-}
 
 async function debugKuru(user: string) {
   const PROXY1 = '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923'
