@@ -165,25 +165,31 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
 }
 
 // ─── CURVE — pool APRs ────────────────────────────────────────────────────────
+// Correct API: api-core.curve.finance (NOT api.curve.fi — confirmed via Network tab)
+// Active pool types on Monad: factory-twocrypto (9 pools), factory-stable-ng (17 pools)
 async function fetchCurve(): Promise<AprEntry[]> {
+  const BASE = 'https://api-core.curve.finance/v1'
   try {
-    const res = await fetch('https://api.curve.fi/v1/getPools/all/monad-mainnet', {
-      signal: AbortSignal.timeout(10_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const pools: any[] = data?.data?.poolData ?? []
-    return pools
+    const [r1, r2] = await Promise.all([
+      fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ])
+    const allPools: any[] = [...(r1?.data?.poolData ?? []), ...(r2?.data?.poolData ?? [])]
+    return allPools
       .map((p: any) => {
         const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
-        const apy    = Number(p.latestDailyApyPcent ?? p.baseApy?.day ?? p.apy ?? 0)
+        const apr = Number(p.latestDailyApyPcent ?? p.baseApy?.day ?? p.apy ?? p.gaugeCrvApy?.[0] ?? p.totalApyPcent ?? 0)
+        const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
+        if (tvl < 1 && apr < 0.01) return null
+        const poolId = p.id ?? p.address
         return {
-          protocol: 'Curve', logo: '🌊', url: `https://curve.fi/#/monad/pools`,
+          protocol: 'Curve', logo: '🌊',
+          url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`,
           tokens, label: p.name ?? tokens.join(' / '),
-          apr: apy, type: 'pool' as const, isStable: allStable(tokens),
+          apr, type: 'pool' as const, isStable: allStable(tokens),
         }
       })
-      .filter((e: AprEntry) => e.apr > 0.01)
+      .filter(Boolean) as AprEntry[]
   } catch { return [] }
 }
 
@@ -380,7 +386,7 @@ export async function GET() {
     ...unwrap(renzoR),
     ...unwrap(gearboxR),
     ...getMidas(),
-  ].filter(e => e.apr > 0)
+  ].filter(e => e.apr >= 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
 
