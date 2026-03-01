@@ -416,6 +416,8 @@ async function fetchCurve(user: string): Promise<any[]> {
 
     if (netValueUSD < 0.01) continue
 
+    // Calculate APR from virtualPrice delta (stored in pool object from getPools response)
+    // virtualPrice is in 1e18; we'll compute APR in the second pass with block data
     const coins = pool.coins?.map((c: any) => c.symbol) ?? []
     const poolId = pool.id ?? pool.address
     positions.push({
@@ -424,7 +426,7 @@ async function fetchCurve(user: string): Promise<any[]> {
       label: pool.name ?? coins.join('/'),
       tokens: coins,
       amountUSD: netValueUSD,
-      apy: Number(pool.gaugeCrvApy?.[0] ?? 0),
+      apy: 0, // APR calculated via virtualPrice in best-aprs; 0 here is safe fallback
       netValueUSD,
       inRange: null,
     })

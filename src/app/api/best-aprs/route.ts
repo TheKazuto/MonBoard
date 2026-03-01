@@ -164,32 +164,71 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── CURVE — pool APRs ────────────────────────────────────────────────────────
-// Correct API: api-core.curve.finance (NOT api.curve.fi — confirmed via Network tab)
-// Active pool types on Monad: factory-twocrypto (9 pools), factory-stable-ng (17 pools)
+// ─── CURVE — pool APRs (virtualPrice-based, on-chain) ────────────────────────
+// Correct API: api-core.curve.finance, slug: "monad"
+// APR = ((virtualPrice_now / virtualPrice_24h_ago)^365 - 1) * 100
+// Monad block time ~0.44s → 24h ≈ 195,000 blocks
 async function fetchCurve(): Promise<AprEntry[]> {
-  const BASE = 'https://api-core.curve.finance/v1'
+  const BASE       = 'https://api-core.curve.finance/v1'
+  const MONAD_RPC2 = 'https://rpc.monad.xyz'
+  const BLOCKS_24H = 195_000 // Monad ~0.44s/block
+  const GET_VP     = '0xbb7b8b80' // get_virtual_price()
+
   try {
+    // Fetch pool lists in parallel
     const [r1, r2] = await Promise.all([
       fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
     ])
     const allPools: any[] = [...(r1?.data?.poolData ?? []), ...(r2?.data?.poolData ?? [])]
-    return allPools
-      .map((p: any) => {
-        const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
-        const apr = Number(p.latestDailyApyPcent ?? p.baseApy?.day ?? p.apy ?? p.gaugeCrvApy?.[0] ?? p.totalApyPcent ?? 0)
-        const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
-        if (tvl < 1 && apr < 0.01) return null
-        const poolId = p.id ?? p.address
-        return {
-          protocol: 'Curve', logo: '🌊',
-          url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`,
-          tokens, label: p.name ?? tokens.join(' / '),
-          apr, type: 'pool' as const, isStable: allStable(tokens),
-        }
+    // Only compute APR for pools with meaningful TVL
+    const livePools = allPools.filter(p => Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0) > 100)
+    if (livePools.length === 0) return []
+
+    // Get current block
+    const bnRes = await fetch(MONAD_RPC2, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
+      signal: AbortSignal.timeout(4_000),
+    }).then(r => r.json()).catch(() => ({ result: '0x0' }))
+    const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
+    const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+
+    // Batch: vpNow + vp24hAgo for every live pool
+    const vpCalls: any[] = []
+    livePools.forEach((p, i) => {
+      const addr = p.address
+      vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: addr, data: GET_VP }, 'latest']  })
+      vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: addr, data: GET_VP }, block24h] })
+    })
+    const vpRes = await fetch(MONAD_RPC2, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(vpCalls),
+      signal: AbortSignal.timeout(12_000),
+    }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
+
+    const entries: AprEntry[] = []
+    livePools.forEach((p, i) => {
+      const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
+      const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
+      let apr = 0
+      if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
+        try {
+          const now = Number(BigInt(vpNow)) / 1e18
+          const old = Number(BigInt(vpOld)) / 1e18
+          if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
+        } catch { /* skip */ }
+      }
+      const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
+      const poolId = p.id ?? p.address
+      entries.push({
+        protocol: 'Curve', logo: '🌊',
+        url: `https://curve.finance/dex/monad/pools/${poolId}/deposit`,
+        tokens, label: p.name ?? tokens.join(' / '),
+        apr, type: 'pool' as const, isStable: allStable(tokens),
       })
-      .filter(Boolean) as AprEntry[]
+    })
+    return entries
   } catch { return [] }
 }
 
