@@ -18,7 +18,7 @@ export interface AprEntry {
 // ─── Stablecoin classification ────────────────────────────────────────────────
 const STABLECOINS = new Set([
   'USDC', 'USDT', 'USDT0', 'AUSD', 'DAI', 'FRAX', 'BUSD',
-  'USDC.e', 'mTBILL', 'crvUSD', 'TUSD', 'LUSD', 'MIM',
+  'USDC.e', 'mTBILL', 'crvUSD', 'TUSD', 'LUSD', 'MIM', 'USD1', 'LVUSD',
 ])
 
 function isStable(sym: string): boolean { return STABLECOINS.has(sym) }
@@ -512,6 +512,41 @@ async function fetchUniswapV4(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
+// ─── PANCAKESWAP V3 — pools via explorer API ─────────────────────────────────
+async function fetchPancakeswap(): Promise<AprEntry[]> {
+  try {
+    const res = await fetch(
+      'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
+      { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    const rows: any[] = data?.rows ?? []
+    const out: AprEntry[] = []
+    for (const p of rows) {
+      const tvl    = Number(p.tvlUSD ?? 0)
+      const apr24  = Number(p.apr24h ?? 0)
+      if (tvl < 100 || apr24 <= 0) continue
+      const apr = apr24 * 100  // api returns decimal (0.57 = 57%)
+      if (apr < 0.01) continue
+      const t0 = p.token0?.symbol ?? '?'
+      const t1 = p.token1?.symbol ?? '?'
+      const tokens = [t0, t1]
+      const fee = Number(p.feeTier ?? 0)
+      const feePct = fee / 10000
+      const feeLabel = feePct >= 0.01 ? `${feePct}%` : `${fee / 100}bp`
+      const poolAddr = p.id ?? ''
+      out.push({
+        protocol: 'PancakeSwap V3', logo: '🥞',
+        url: `https://pancakeswap.finance/liquidity/pool/monad/${poolAddr}`,
+        tokens, label: `${t0}/${t1} ${feeLabel}`,
+        apr, type: 'pool', isStable: allStable(tokens),
+      })
+    }
+    return out
+  } catch { return [] }
+}
+
 // ─── GEARBOX — credit account pools ──────────────────────────────────────────
 async function fetchGearbox(): Promise<AprEntry[]> {
   // Gearbox not yet deployed on Monad mainnet
@@ -520,7 +555,7 @@ async function fetchGearbox(): Promise<AprEntry[]> {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 export async function GET() {
-  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, renzoR, gearboxR, uniV3R, uniV4R] =
+  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, renzoR, gearboxR, uniV3R, uniV4R, pancakeR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -534,6 +569,7 @@ export async function GET() {
       fetchGearbox(),
       fetchUniswapV3(),
       fetchUniswapV4(),
+      fetchPancakeswap(),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
@@ -553,6 +589,7 @@ export async function GET() {
     ...unwrap(gearboxR),
     ...unwrap(uniV3R),
     ...unwrap(uniV4R),
+    ...unwrap(pancakeR),
     ...getMidas(),
   ].filter(e => e.apr > 0)
 
