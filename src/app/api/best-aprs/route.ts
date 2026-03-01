@@ -250,55 +250,69 @@ async function fetchCurve(): Promise<AprEntry[]> {
       }).then(r => r.json()).catch(() => ({ result: [] })),
     ])
 
-    const logs: any[] = logsResult?.result ?? []
+    const logs: any[] = Array.isArray(logsResult?.result) ? logsResult.result : []
 
-    // Step 3: Aggregate volume per pool from logs
-    // TokenExchange data layout: sold_id(32) | tokens_sold(32) | bought_id(32) | tokens_bought(32)
-    // tokens_sold is at bytes 32-63 of data
+    // Step 3: Aggregate volume per pool from TokenExchange logs
     const volumeByPool: Record<string, number> = {}
     for (const log of logs) {
       const poolAddr = log.address?.toLowerCase()
-      if (!poolAddr) continue
       const pool = livePools.find(p => p.address.toLowerCase() === poolAddr)
       if (!pool) continue
-
       try {
-        const data = log.data?.slice(2) ?? '' // strip 0x
+        const data = log.data?.slice(2) ?? ''
         if (data.length < 128) continue
-        // tokens_sold is 2nd word (bytes 32-63)
-        const tokensSoldHex = data.slice(64, 128)
-        const tokensSoldRaw = BigInt('0x' + tokensSoldHex)
-
-        // Get sold_id to know which coin's decimals to use
-        const soldIdHex = data.slice(0, 64)
-        const soldId = Number(BigInt('0x' + soldIdHex))
-        const coin = pool.coins?.[soldId]
-        const decimals = Number(coin?.decimals ?? 18)
-        // For stablecoins price ≈ $1, for others we'd need price — use $1 as approximation
-        // This is accurate for stable-ng pools, approximate for twocrypto
-        const tokensSoldUsd = Number(tokensSoldRaw) / Math.pow(10, decimals)
-
-        volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + tokensSoldUsd
-      } catch { /* skip malformed log */ }
+        const soldId    = Number(BigInt('0x' + data.slice(0, 64)))
+        const tokensSold = BigInt('0x' + data.slice(64, 128))
+        const decimals  = Number(pool.coins?.[soldId]?.decimals ?? 18)
+        volumeByPool[poolAddr] = (volumeByPool[poolAddr] ?? 0) + Number(tokensSold) / Math.pow(10, decimals)
+      } catch { /* skip */ }
     }
 
-    // Step 4: Build APR entries
+    const hasVolumeData = Object.keys(volumeByPool).length > 0
+
+    // Step 4: If no volume data from logs (RPC limit or no trades), fallback to virtualPrice delta
+    let vpRes: any[] = []
+    if (!hasVolumeData) {
+      const vpCalls: any[] = []
+      const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
+      livePools.forEach((p, i) => {
+        vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, 'latest']  })
+        vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, block24h] })
+      })
+      vpRes = await fetch(RPC, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(vpCalls),
+        signal: AbortSignal.timeout(12_000),
+      }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
+    }
+
+    // Step 5: Build APR entries
     const entries: AprEntry[] = []
     livePools.forEach((p, i) => {
       const poolAddr = p.address.toLowerCase()
       const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
       if (tvl <= 0) return
 
-      // fee() returns value in 1e10 units (e.g. 4000000 = 0.04%)
-      const feeRaw = decodeUint(feeResults.find((r: any) => r.id === i)?.result ?? '0x')
-      const feeRate = Number(feeRaw) / 1e10 // e.g. 0.0004 = 0.04%
+      let apr = 0
 
-      const volume24h = volumeByPool[poolAddr] ?? 0
-      // APR = annual trading fees / TVL
-      // = (volume_24h × fee_rate × 365) / TVL × 100 (to percent)
-      const apr = tvl > 0 && volume24h > 0
-        ? (volume24h * feeRate * 365 / tvl) * 100
-        : 0
+      if (hasVolumeData) {
+        // Volume-based APR: (volume_24h × fee_rate × 365) / TVL × 100
+        const feeRaw  = decodeUint(feeResults.find((r: any) => r.id === i)?.result ?? '0x')
+        const feeRate = Number(feeRaw) / 1e10
+        const vol24h  = volumeByPool[poolAddr] ?? 0
+        if (vol24h > 0 && feeRate > 0) apr = (vol24h * feeRate * 365 / tvl) * 100
+      } else {
+        // Fallback: virtualPrice delta APR
+        const vpNow = vpRes.find((r: any) => r.id === i * 2)?.result ?? '0x'
+        const vpOld = vpRes.find((r: any) => r.id === i * 2 + 1)?.result ?? '0x'
+        if (vpNow && vpNow !== '0x' && vpOld && vpOld !== '0x') {
+          try {
+            const now = Number(BigInt(vpNow)) / 1e18
+            const old = Number(BigInt(vpOld)) / 1e18
+            if (old > 0 && now > old) apr = (Math.pow(now / old, 365) - 1) * 100
+          } catch { /* skip */ }
+        }
+      }
 
       if (apr < 0.001) return
       const tokens = (p.coins ?? []).map((c: any) => c.symbol).filter(Boolean)
