@@ -59,19 +59,21 @@ async function fetchMorpho(): Promise<AprEntry[]> {
   // GraphQL confirmed at api.morpho.org/graphql for Monad (chainId 143)
   // Note: removed whitelisted filter — not supported on Monad schema, breaks query
   // supplyApy/netApy are returned as APY (not APR) — converted below
+  // Minimal query — removed orderBy/orderDirection and supplyAssetsUsd/totalAssetsUsd
+  // to avoid schema fields that may not exist on Monad's GraphQL endpoint
   const query = `{
-    markets(where:{chainId_in:[143]}, first:100, orderBy:SupplyAssetsUsd, orderDirection:Desc) {
+    markets(where:{chainId_in:[143]}, first:100) {
       uniqueKey
       loanAsset { symbol }
       collateralAsset { symbol }
-      state { supplyApy borrowApy supplyAssetsUsd }
+      state { supplyApy borrowApy }
     }
-    vaults(where:{chainId_in:[143]}, first:50, orderBy:TotalAssetsUsd, orderDirection:Desc) {
+    vaults(where:{chainId_in:[143]}, first:50) {
       address
       name
       symbol
       asset { symbol }
-      state { netApy totalAssetsUsd }
+      state { netApy }
     }
   }`
   try {
