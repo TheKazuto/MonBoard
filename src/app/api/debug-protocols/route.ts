@@ -18,6 +18,9 @@ function decodeAddress(hex: string): string {
   if (!hex || hex.length < 66) return '0x0'
   return '0x' + hex.slice(hex.length - 40)
 }
+function decodeFullString(hex: string): string {
+  return decodeString(hex)
+}
 function decodeString(hex: string): string {
   if (!hex || hex === '0x' || hex.length < 4) return ''
   try {
