@@ -54,37 +54,61 @@ async function debugCurve(user: string) {
   const addr = user.toLowerCase()
   const paddedAddr = addr.slice(2).padStart(64, '0')
 
-  // The APR (4.71% 3pool, 26.35% MON LSTs) must come from api.curve.finance/api/getPools
-  // which is different from api-core.curve.finance — test both and compare APR fields
-  const aprEndpoints = [
-    'https://api.curve.finance/api/getPools/monad/factory-stable-ng',
-    'https://api.curve.finance/api/getPools/monad/factory-twocrypto',
-    `${BASE}/getPools/monad/factory-stable-ng`,
-    'https://api.curve.finance/api/getSubgraphData/monad',
-    'https://api.curve.finance/api/getVolumes/monad',
-    'https://api.curve.finance/api/getApys/monad',
-    'https://api.curve.finance/api/getPools/all/monad',
+  // APR is NOT in any Curve API for Monad.
+  // Calculate on-chain: baseAPR = ((vpNow / vp24hAgo)^365 - 1) * 100
+  // Monad ~1s/block → 24h ≈ 86400 blocks ago
+  const POOL_3POOL   = '0x942644106B073E30D72c2C5D7529D5C296ea91ab'
+  const POOL_MONLSTS = '0x74d80eE400D3026FDd2520265cC98300710b25D4'
+  const GET_VP       = '0xbb7b8b80' // get_virtual_price()
+
+  // Get current block number
+  const blockRes = await rpcBatch([{ jsonrpc: '2.0', id: 999, method: 'eth_blockNumber', params: [] }])
+  const currentBlock = Number(BigInt(blockRes[0]?.result ?? '0x0'))
+  const block24hAgo  = '0x' + Math.max(0, currentBlock - 86400).toString(16)
+  const block7dAgo   = '0x' + Math.max(0, currentBlock - 604800).toString(16)
+
+  // Fetch virtual prices at 3 points in time for both pools
+  const vpCalls = [
+    { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: POOL_3POOL,   data: GET_VP }, 'latest']   },
+    { jsonrpc: '2.0', id: 2, method: 'eth_call', params: [{ to: POOL_3POOL,   data: GET_VP }, block24hAgo] },
+    { jsonrpc: '2.0', id: 3, method: 'eth_call', params: [{ to: POOL_3POOL,   data: GET_VP }, block7dAgo]  },
+    { jsonrpc: '2.0', id: 4, method: 'eth_call', params: [{ to: POOL_MONLSTS, data: GET_VP }, 'latest']   },
+    { jsonrpc: '2.0', id: 5, method: 'eth_call', params: [{ to: POOL_MONLSTS, data: GET_VP }, block24hAgo] },
+    { jsonrpc: '2.0', id: 6, method: 'eth_call', params: [{ to: POOL_MONLSTS, data: GET_VP }, block7dAgo]  },
   ]
-  const aprResults: Record<string, any> = {}
-  for (const url of aprEndpoints) {
-    const r = await tryFetch(url)
-    const key = url.replace('https://api-core.curve.finance/v1/', 'core/').replace('https://api.curve.finance/api/', 'api/')
-    const pools = r.body?.data?.poolData ?? []
-    // For getPools: extract APR-related fields from first pool with TVL
-    const bigPool = pools.find((p: any) => Number(p.usdTotal ?? 0) > 1000)
-    const aprSample = bigPool ? Object.fromEntries(
-      Object.entries(bigPool).filter(([k]) => /(apy|apr|volume|fee|baseApy|latestDaily)/i.test(k))
-    ) : undefined
-    aprResults[key] = {
-      status: r.status,
-      ok: r.ok,
-      error: r.error,
-      poolCount: pools.length,
-      aprFieldsFromBigPool: aprSample,
-      bigPoolName: bigPool?.name,
-      topKeys: r.ok && r.body && pools.length === 0 ? Object.keys(r.body).slice(0, 8) : undefined,
-      rawDataSample: r.ok && r.body?.data && pools.length === 0 ? JSON.stringify(r.body.data).slice(0, 300) : undefined,
-    }
+  const vpRes = await rpcBatch(vpCalls, 12_000)
+
+  function calcApr(vpNow: string, vpOld: string, periods: number): number {
+    if (!vpNow || vpNow === '0x' || !vpOld || vpOld === '0x') return 0
+    try {
+      const now = Number(BigInt(vpNow)) / 1e18
+      const old = Number(BigInt(vpOld)) / 1e18
+      if (old <= 0 || now <= old) return 0
+      return (Math.pow(now / old, periods) - 1) * 100
+    } catch { return 0 }
+  }
+
+  const get = (id: number) => vpRes.find((r: any) => r.id === id)?.result ?? '0x'
+  const aprResults = {
+    currentBlock,
+    block24hAgo: currentBlock - 86400,
+    block7dAgo:  currentBlock - 604800,
+    pool3pool: {
+      address: POOL_3POOL,
+      vpNow:    get(1),
+      vp24hAgo: get(2),
+      vp7dAgo:  get(3),
+      apr24h:   calcApr(get(1), get(2), 365).toFixed(4) + '%',
+      apr7d:    calcApr(get(1), get(3), 52).toFixed(4) + '%',
+    },
+    poolMonLsts: {
+      address: POOL_MONLSTS,
+      vpNow:    get(4),
+      vp24hAgo: get(5),
+      vp7dAgo:  get(6),
+      apr24h:   calcApr(get(4), get(5), 365).toFixed(4) + '%',
+      apr7d:    calcApr(get(4), get(6), 52).toFixed(4) + '%',
+    },
   }
 
   // Fetch both active pool types
