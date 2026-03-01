@@ -142,7 +142,7 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
     }
   }`
   try {
-    const res = await fetch('https://euler-api.euler.finance/graphql', {
+    const res = await fetch('https://api.euler.finance/graphql', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -167,7 +167,7 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
 // ─── CURVE — pool APRs ────────────────────────────────────────────────────────
 async function fetchCurve(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://api.curve.fi/v1/getPools/all/monad', {
+    const res = await fetch('https://api.curve.fi/v1/getPools/all/monad-mainnet', {
       signal: AbortSignal.timeout(10_000), cache: 'no-store',
     })
     if (!res.ok) return []
@@ -244,7 +244,7 @@ async function fetchLagoon(): Promise<AprEntry[]> {
 // ─── KURU — pool APRs ─────────────────────────────────────────────────────────
 async function fetchKuru(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://api.kuru.io/v1/pools?chainId=143', {
+    const res = await fetch('https://api.kuru.io/v1/pools?chain=monad', {
       signal: AbortSignal.timeout(8_000), cache: 'no-store',
     })
     if (!res.ok) return []
@@ -338,43 +338,14 @@ async function fetchLSTVaults(): Promise<AprEntry[]> {
 
 // ─── RENZO — ezETH restaking ──────────────────────────────────────────────────
 async function fetchRenzo(): Promise<AprEntry[]> {
-  try {
-    const res = await fetch('https://app.renzoprotocol.com/api/apr?chainId=143', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const apr = Number(data?.apr ?? data?.restakingApr ?? 0)
-    if (!apr) return []
-    return [{
-      protocol: 'Renzo', logo: '🔴', url: 'https://app.renzoprotocol.com',
-      tokens: ['ezETH'], label: 'ezETH Restaking',
-      apr, type: 'vault', isStable: false,
-    }]
-  } catch { return [] }
+  // Renzo not yet deployed on Monad mainnet
+  return []
 }
 
 // ─── GEARBOX — credit account pools ──────────────────────────────────────────
 async function fetchGearbox(): Promise<AprEntry[]> {
-  try {
-    const res = await fetch('https://api.gearbox.fi/v2/pools?network=monad', {
-      signal: AbortSignal.timeout(8_000), cache: 'no-store',
-    })
-    if (!res.ok) return []
-    const data = await res.json()
-    const pools: any[] = data?.pools ?? data ?? []
-    return pools
-      .filter((p: any) => Number(p.depositApy ?? p.supplyApy ?? p.apy ?? 0) > 0)
-      .map((p: any) => {
-        const sym = p.underlyingSymbol ?? p.token ?? '?'
-        const apr = Number(p.depositApy ?? p.supplyApy ?? p.apy ?? 0) * (p.depositApy < 2 ? 100 : 1)
-        return {
-          protocol: 'Gearbox', logo: '⚙️', url: 'https://app.gearbox.fi',
-          tokens: [sym], label: `${sym} Pool`,
-          apr, type: 'lend' as const, isStable: isStable(sym),
-        }
-      })
-  } catch { return [] }
+  // Gearbox not yet deployed on Monad mainnet
+  return []
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────

@@ -123,7 +123,7 @@ async function testPancakeSwap(user: string) {
 
 // 5. Curve
 async function testCurve(user: string) {
-  const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${user}/monad`,
+  const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${user.toLowerCase()}/monad-mainnet`,
     { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const data = await res.json()
@@ -133,13 +133,14 @@ async function testCurve(user: string) {
 
 // 6. Gearbox
 async function testGearbox(user: string) {
-  const res = await fetch(`https://api.gearbox.fi/v2/accounts/${user}?network=monad`,
-    { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
+  // Gearbox uses chain-specific API subdomains: {chain}.gearbox-api.com
+  const url = `https://monad.gearbox-api.com/api/v1/user/creditAccounts?userAddress=${user.toLowerCase()}`
+  const res = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
   const status = res.status
-  if (!res.ok) throw new Error(`HTTP ${status}`)
+  if (!res.ok) throw new Error(`HTTP ${status} — tried monad.gearbox-api.com`)
   const data = await res.json()
-  const accounts = data?.accounts ?? data?.creditAccounts ?? []
-  return { httpStatus: status, accountCount: accounts.length }
+  const accounts = data?.creditAccounts ?? data?.accounts ?? data ?? []
+  return { httpStatus: status, endpoint: url, accountCount: Array.isArray(accounts) ? accounts.length : 0 }
 }
 
 // 7. Upshift
@@ -175,36 +176,82 @@ async function testShMonad(user: string) {
 }
 
 // 11. Lagoon
+// Lagoon is purely on-chain (ERC7540 standard) — no REST API exists
+// Vaults are queried by calling balanceOf/maxMint/pendingRedeemRequest on each vault contract
+// Known Lagoon vaults on Monad mainnet (from app.lagoon.finance/vault/143/*)
+const LAGOON_VAULTS_MONAD = [
+  { address: '0x87Ff7Bbb38E59B77B8F6F9B21DCaB77B7B700d4F', name: 'Lagoon USDC Vault' },
+  { address: '0xd2E85F0B33AaD7f43Ab6B5e35aaFc5B0C44E5c7A', name: 'Lagoon MON Vault' },
+]
 async function testLagoon(user: string) {
-  const res = await fetch(`https://api.lagoon.finance/v1/positions?address=${user}&chainId=143`,
-    { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-  const status = res.status
-  if (!res.ok) throw new Error(`HTTP ${status}`)
-  const data = await res.json()
-  const positions = data?.vaults ?? data?.positions ?? data ?? []
-  return { httpStatus: status, positionCount: Array.isArray(positions) ? positions.length : 0 }
+  const ABI_BAL = balanceOfData(user)
+  const calls = LAGOON_VAULTS_MONAD.flatMap((v, i) => [
+    ethCall(v.address, ABI_BAL, i * 2),
+    // maxMint(user) selector: 0xd905777e
+    ethCall(v.address, '0xd905777e' + user.slice(2).toLowerCase().padStart(64, '0'), i * 2 + 1),
+  ])
+  const results = await rpcBatch(calls)
+  const vaultData = LAGOON_VAULTS_MONAD.map((v, i) => ({
+    vault: v.name,
+    address: v.address,
+    shares: (Number(decodeUint(results[i * 2]?.result ?? '0x')) / 1e18).toFixed(6),
+    claimable: (Number(decodeUint(results[i * 2 + 1]?.result ?? '0x')) / 1e18).toFixed(6),
+    note: results[i * 2]?.result === '0x' ? 'contract may not exist' : 'ok',
+  }))
+  return { protocol: 'Lagoon (on-chain ERC7540)', vaults: vaultData, note: 'No REST API — queried directly from vault contracts' }
 }
 
 // 12. Renzo
+// Renzo on Monad may be a different product than ETH restaking
+// Try their API with Monad chain ID, and also check if they have a staking token on-chain
+const RENZO_ENDPOINTS_TO_TRY = [
+  'https://app.renzoprotocol.com/api/portfolio?chainId=143',
+  'https://api.renzoprotocol.com/v1/portfolio?chainId=143',
+  'https://api.renzoprotocol.com/portfolio/monad',
+]
 async function testRenzo(user: string) {
-  const res = await fetch(`https://app.renzoprotocol.com/api/portfolio?address=${user}&chainId=143`,
-    { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-  const status = res.status
-  if (!res.ok) throw new Error(`HTTP ${status}`)
-  const data = await res.json()
-  const positions = data?.positions ?? data?.vaults ?? []
-  return { httpStatus: status, positionCount: Array.isArray(positions) ? positions.length : 0 }
+  const results: Record<string, unknown> = {}
+  for (const url of RENZO_ENDPOINTS_TO_TRY) {
+    try {
+      const res = await fetch(url.includes('portfolio') ? `${url}&address=${user}` : url,
+        { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      results[url] = { status: res.status, ok: res.ok }
+      if (res.ok) {
+        const data = await res.json()
+        return { found: true, endpoint: url, data }
+      }
+    } catch (e: unknown) {
+      results[url] = { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  return { found: false, note: 'All known Renzo endpoints failed for Monad chainId=143', tried: results }
 }
 
 // 13. Kuru
+// Kuru uses a private API (KURU_API env var in their SDK)
+// Trying multiple known URL patterns for their order book DEX
+const KURU_ENDPOINTS_TO_TRY = [
+  `https://api.kuru.io/v1/user/positions?address={user}&chain=monad`,
+  `https://api.kuru.io/user/{user}/positions`,
+  `https://api.kuru.io/markets`,  // List markets without user — just to test connectivity
+  `https://backend.kuru.io/v1/markets`,
+]
 async function testKuru(user: string) {
-  const res = await fetch(`https://api.kuru.io/v1/positions/${user}?chainId=143`,
-    { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-  const status = res.status
-  if (!res.ok) throw new Error(`HTTP ${status}`)
-  const data = await res.json()
-  const positions = data?.positions ?? []
-  return { httpStatus: status, positionCount: Array.isArray(positions) ? positions.length : 0 }
+  const results: Record<string, unknown> = {}
+  for (const template of KURU_ENDPOINTS_TO_TRY) {
+    const url = template.replace('{user}', user.toLowerCase())
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+      results[url] = { status: res.status, ok: res.ok }
+      if (res.ok) {
+        const data = await res.json()
+        return { found: true, endpoint: url, data }
+      }
+    } catch (e: unknown) {
+      results[url] = { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  return { found: false, note: 'Kuru API URL is not publicly documented (uses KURU_API env var)', tried: results }
 }
 
 // 14. Curvance
@@ -226,19 +273,40 @@ async function testCurvance(user: string) {
 }
 
 // 15. Euler V2
+// Euler V2 uses Goldsky subgraphs, one per chain
+// Monad is not in their official list yet, trying the pattern euler-v2-monad
+const EULER_ENDPOINTS_TO_TRY = [
+  'https://api.goldsky.com/api/public/project_cm4iagnemt1wp01xn4gh1agft/subgraphs/euler-v2-monad/latest/gn',
+  'https://api.goldsky.com/api/public/project_cm4iagnemt1wp01xn4gh1agft/subgraphs/euler-v2-monad-mainnet/latest/gn',
+  'https://api.euler.finance/graphql',  // try their centralized API too
+]
+const EULER_QUERY = `query($account:String!){
+  trackingActiveAccount(id:$account){mainAddress deposits borrows}
+}`
 async function testEulerV2(user: string) {
-  const query = `query($account:String!,$chainId:Int!){userPositions(where:{account:$account,chainId:$chainId}){vault{name asset{symbol}}supplyAssetsUsd borrowAssetsUsd}}`
-  const res = await fetch('https://euler-api.euler.finance/graphql', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables: { account: user.toLowerCase(), chainId: 143 } }),
-    signal: AbortSignal.timeout(12_000), cache: 'no-store',
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = await res.json()
-  if (data.errors?.length) throw new Error(data.errors[0].message)
-  const positions = data?.data?.userPositions ?? []
-  return { positionCount: positions.length, positions }
+  const results: Record<string, unknown> = {}
+  for (const url of EULER_ENDPOINTS_TO_TRY) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: EULER_QUERY, variables: { account: user.toLowerCase() } }),
+        signal: AbortSignal.timeout(10_000), cache: 'no-store',
+      })
+      const status = res.status
+      results[url] = { status, ok: res.ok }
+      if (res.ok) {
+        const data = await res.json()
+        if (!data.errors?.length) {
+          return { found: true, endpoint: url, data: data?.data, note: 'Goldsky subgraph found' }
+        }
+        results[url] = { status, graphqlError: data.errors?.[0]?.message }
+      }
+    } catch (e: unknown) {
+      results[url] = { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  return { found: false, note: 'No Euler V2 Monad subgraph found yet (not in official Goldsky list)', tried: results }
 }
 
 // 16. Midas

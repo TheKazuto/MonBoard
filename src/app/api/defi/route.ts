@@ -356,7 +356,7 @@ async function fetchUniswapV3(user: string, protocol: string, nftPM: string, fac
 // ─── CURVE ────────────────────────────────────────────────────────────────────
 async function fetchCurve(user: string): Promise<any[]> {
   try {
-    const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${user}/monad`,
+    const res = await fetch(`https://api.curve.fi/v1/getLiquidityProviderData/${user.toLowerCase()}/monad-mainnet`,
       { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
@@ -376,29 +376,9 @@ async function fetchCurve(user: string): Promise<any[]> {
 }
 
 // ─── GEARBOX ──────────────────────────────────────────────────────────────────
-async function fetchGearbox(user: string): Promise<any[]> {
-  try {
-    const res = await fetch(`https://api.gearbox.fi/v2/accounts/${user}?network=monad`,
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-    if (!res.ok) return []
-    const data = await res.json()
-    return (data?.accounts ?? data?.creditAccounts ?? [])
-      .filter((a: any) => Number(a.totalValueUsd ?? 0) > 0.01)
-      .map((a: any) => {
-        const totalUSD = Number(a.totalValueUsd ?? 0)
-        const debtUSD  = Number(a.borrowedAmountUsd ?? 0)
-        return {
-          protocol: 'Gearbox', type: 'lending', logo: '⚙️',
-          url: 'https://app.gearbox.fi', chain: 'Monad',
-          label: a.creditManagerName ?? 'Credit Account',
-          supply: [{ symbol: 'Portfolio', amountUSD: totalUSD }],
-          borrow: debtUSD > 0 ? [{ symbol: a.borrowedToken ?? 'USDC', amountUSD: debtUSD }] : [],
-          totalCollateralUSD: totalUSD, totalDebtUSD: debtUSD,
-          netValueUSD: totalUSD - debtUSD,
-          healthFactor: a.healthFactor ? Number(a.healthFactor) : null,
-        }
-      })
-  } catch { return [] }
+async function fetchGearbox(_user: string): Promise<any[]> {
+  // Gearbox is not yet deployed on Monad mainnet — returning empty until official launch
+  return []
 }
 
 // ─── UPSHIFT ──────────────────────────────────────────────────────────────────
@@ -492,7 +472,7 @@ async function fetchShMonad(user: string, monPrice: number): Promise<any[]> {
 // Try API endpoint
 async function fetchLagoon(user: string): Promise<any[]> {
   try {
-    const res = await fetch(`https://api.lagoon.finance/v1/positions?address=${user}&chainId=143`,
+    const res = await fetch(`https://api.lagoon.finance/api/v1/positions?address=${user.toLowerCase()}&chainId=143`,
       { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
@@ -513,32 +493,16 @@ async function fetchLagoon(user: string): Promise<any[]> {
 // ─── RENZO (ezETH on Monad) ───────────────────────────────────────────────────
 // Renzo integrates with Curvance on Monad; ezETH is bridged
 // Try Renzo API
-async function fetchRenzo(user: string): Promise<any[]> {
-  try {
-    const res = await fetch(`https://app.renzoprotocol.com/api/portfolio?address=${user}&chainId=143`,
-      { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
-    if (!res.ok) return []
-    const data = await res.json()
-    const positions = data?.positions ?? data?.vaults ?? []
-    return positions
-      .filter((p: any) => Number(p.valueUsd ?? 0) > 0.01)
-      .map((p: any) => ({
-        protocol: 'Renzo', type: 'vault', logo: '🔴',
-        url: 'https://app.renzoprotocol.com', chain: 'Monad',
-        label: p.name ?? 'ezETH Restaking',
-        asset: p.asset ?? 'ezETH',
-        amountUSD: Number(p.valueUsd ?? 0),
-        apy: p.apy ? Number(p.apy) : 0,
-        netValueUSD: Number(p.valueUsd ?? 0),
-      }))
-  } catch { return [] }
+async function fetchRenzo(_user: string): Promise<any[]> {
+  // Renzo (ezETH restaking) is not yet deployed on Monad mainnet — returning empty until official launch
+  return []
 }
 
 // ─── KURU (AMM Vault LP positions) ───────────────────────────────────────────
 // Kuru has vault contracts for AMM LPs; try their API
 async function fetchKuru(user: string): Promise<any[]> {
   try {
-    const res = await fetch(`https://api.kuru.io/v1/positions/${user}?chainId=143`,
+    const res = await fetch(`https://api.kuru.io/v1/user/positions?address=${user.toLowerCase()}&chain=monad`,
       { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return []
     const data = await res.json()
@@ -660,7 +624,7 @@ async function fetchEulerV2(user: string): Promise<any[]> {
     }
   }`
   try {
-    const res = await fetch('https://euler-api.euler.finance/graphql', {
+    const res = await fetch('https://api.euler.finance/graphql', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, variables: { account: user.toLowerCase(), chainId: 143 } }),
