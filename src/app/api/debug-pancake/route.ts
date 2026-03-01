@@ -4,59 +4,63 @@ export const revalidate = 0
 async function tryFetch(url: string, opts?: RequestInit) {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store', ...opts })
-    if (!r.ok) return { status: r.status, statusText: r.statusText }
     const text = await r.text()
+    if (!r.ok) return { status: r.status, body: text.slice(0, 300) }
     try { return JSON.parse(text) } catch { return text.slice(0, 500) }
   } catch(e: any) { return { error: e.message } }
 }
 
 export async function GET() {
   const results: any = {}
-  // Monad chainId = 10143 on PancakeSwap (their internal ID) or 143 (actual chain ID)
-  const chainIds = [143, 10143]
 
-  // 1. V3 pools TVL endpoint
-  for (const id of chainIds) {
-    results[`v3_pools_tvl_${id}`] = await tryFetch(`https://routing-api.pancakeswap.com/v0/v3-pools-tvl/${id}`)
-  }
-
-  // 2. V3 farms endpoint
-  for (const chain of ['monad', 'mon', '143', '10143']) {
-    results[`v3_farms_${chain}`] = await tryFetch(`https://pancakeswap.finance/api/v3/${chain}/farms`)
-  }
-
-  // 3. Explorer API - cached pools
-  for (const id of chainIds) {
-    results[`explorer_pools_${id}`] = await tryFetch(
-      `https://explorer.pancakeswap.com/api/cached/pools/tvl-refs`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ protocols: ['v3'], chains: [id] }) }
+  // 1. Merkl API - PancakeSwap uses this for liquidity campaigns
+  for (const id of [10143, 143]) {
+    results[`merkl_${id}`] = await tryFetch(
+      `https://api.merkl.xyz/v4/opportunities/?chainId=${id}&test=false&mainProtocolId=pancakeswap`,
     )
   }
 
-  // 4. Configs - farms with chainId
-  for (const id of chainIds) {
-    results[`config_farms_${id}`] = await tryFetch(`https://configs.pancakeswap.com/api/data/cached/farms?chainId=${id}`)
+  // 2. Explorer API - try different paths
+  const explorerBase = 'https://explorer.pancakeswap.com/api'
+  for (const id of [10143, 143]) {
+    results[`explorer_cached_${id}`] = await tryFetch(`${explorerBase}/cached/pools/list?chainId=${id}`)
+    results[`explorer_v1_${id}`] = await tryFetch(`${explorerBase}/v1/pools?chainId=${id}`)
   }
 
-  // 5. NodeReal GraphQL for PancakeSwap V3
-  const gql = 'https://open-platform.nodereal.io/2f9e7753b78d4ab983e5d60c47d7fdfb/pancakeswap-v3/graphql'
-  for (const id of chainIds) {
-    results[`nodereal_gql_${id}`] = await tryFetch(gql, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: `{ pools(first: 5, where: { chainId: ${id} }, orderBy: totalValueLockedUSD, orderDirection: desc) { id token0 { symbol } token1 { symbol } feeTier totalValueLockedUSD volumeUSD } }` }),
-    })
+  // 3. Try their main config endpoint to discover Monad chain info
+  results.config_chains = await tryFetch('https://configs.pancakeswap.com/api/data/cached/chains')
+
+  // 4. PancakeSwap specific config endpoints
+  for (const id of [10143, 143]) {
+    results[`config_pools_${id}`] = await tryFetch(`https://configs.pancakeswap.com/api/data/cached/pools?chainId=${id}`)
+    results[`config_v4_${id}`] = await tryFetch(`https://configs.pancakeswap.com/api/data/cached/v4-pools?chainId=${id}`)
   }
 
-  // 6. Try their wallet-api for prices (to confirm Monad support)
-  results.wallet_api_prices = await tryFetch('https://wallet-api.pancakeswap.com/v1/prices?chainId=143')
+  // 5. Try the incentra/brevis endpoint from the scan
+  results.incentra = await tryFetch('https://incentra-prd.brevis.network/sdk/v1/campaigns?protocol=pancakeswap&chainId=10143')
 
-  // 7. Sol explorer style API for Monad
-  results.sol_explorer_pools = await tryFetch('https://sol-explorer.pancakeswap.com/api/cached/v1/pools/info/list?chainId=143')
+  // 6. Try the liquidityCampaigns endpoint from the scan
+  for (const base of [
+    'https://explorer.pancakeswap.com/api',
+    'https://configs.pancakeswap.com/api/data'
+  ]) {
+    results[`liqCampaigns_${base.includes('explorer') ? 'explorer' : 'configs'}`] = await tryFetch(
+      `${base}/liquidityCampaigns`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chainId: 10143 }) }
+    )
+  }
 
-  // 8. Stableswaps
-  for (const id of chainIds) {
-    results[`stableswaps_${id}`] = await tryFetch(`https://configs.pancakeswap.com/api/data/cached/stableswaps?chainId=${id}`)
+  // 7. Try the farms endpoint with proper chain names
+  for (const chain of ['monadMainnet', 'monad-mainnet', 'MONAD_MAINNET']) {
+    results[`farms_${chain}`] = await tryFetch(`https://pancakeswap.finance/api/v3/${chain}/farms`)
+  }
+
+  // 8. Explorer cached/pools/tvl-refs with different protocol values
+  for (const proto of ['v2', 'v3', 'v4', 'stable']) {
+    results[`tvlrefs_${proto}`] = await tryFetch(
+      `${explorerBase}/cached/pools/tvl-refs`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ protocols: [proto], chains: [10143] }) }
+    )
   }
 
   return NextResponse.json(results, { status: 200 })
