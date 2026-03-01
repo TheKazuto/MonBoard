@@ -441,6 +441,51 @@ async function fetchRenzo(): Promise<AprEntry[]> {
   return []
 }
 
+// ─── UNISWAP V3 — top pools via Uniswap GraphQL ──────────────────────────────
+async function fetchUniswap(): Promise<AprEntry[]> {
+  // chain: MONAD confirmed working — returns real mainnet pools
+  // APR = (volume_24h × feeTier_pct) / TVL × 365 × 100
+  const query = `{
+    topV3Pools(chain: MONAD, first: 30) {
+      address feeTier
+      token0 { symbol }
+      token1 { symbol }
+      totalLiquidity { value }
+      cumulativeVolume(duration: DAY) { value }
+    }
+  }`
+  try {
+    const res = await fetch('https://interface.gateway.uniswap.org/v1/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(10_000), cache: 'no-store',
+    })
+    const data = await res.json()
+    const pools = data?.data?.topV3Pools ?? []
+    const out: AprEntry[] = []
+    for (const p of pools) {
+      const tvl    = Number(p.totalLiquidity?.value ?? 0)
+      const vol24h = Number(p.cumulativeVolume?.value ?? 0)
+      const fee    = Number(p.feeTier ?? 0)  // e.g. 3000 = 0.3%
+      if (tvl < 100 || vol24h < 1) continue
+      // feeTier is in millionths (3000 = 0.3% = 3000/1_000_000)
+      const apr = (vol24h * (fee / 1_000_000)) / tvl * 365 * 100
+      if (apr < 0.01) continue
+      const t0 = p.token0?.symbol ?? '?'
+      const t1 = p.token1?.symbol ?? '?'
+      const tokens = [t0, t1]
+      const feeLabel = fee === 100 ? '0.01%' : fee === 500 ? '0.05%' : fee === 3000 ? '0.3%' : fee === 10000 ? '1%' : `${fee/10000}%`
+      out.push({
+        protocol: 'Uniswap V3', logo: '🦄', url: `https://app.uniswap.org/explore/pools/monad/${p.address}`,
+        tokens, label: `${t0}/${t1} ${feeLabel}`,
+        apr, type: 'pool', isStable: allStable(tokens),
+      })
+    }
+    return out.sort((a, b) => b.apr - a.apr)
+  } catch { return [] }
+}
+
 // ─── GEARBOX — credit account pools ──────────────────────────────────────────
 async function fetchGearbox(): Promise<AprEntry[]> {
   // Gearbox not yet deployed on Monad mainnet
@@ -449,7 +494,7 @@ async function fetchGearbox(): Promise<AprEntry[]> {
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 export async function GET() {
-  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, renzoR, gearboxR] =
+  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, renzoR, gearboxR, uniswapR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -461,6 +506,7 @@ export async function GET() {
       fetchLSTVaults(),
       fetchRenzo(),
       fetchGearbox(),
+      fetchUniswap(),
     ])
 
   function unwrap(r: PromiseSettledResult<AprEntry[]>): AprEntry[] {
@@ -478,6 +524,7 @@ export async function GET() {
     ...unwrap(lstR),
     ...unwrap(renzoR),
     ...unwrap(gearboxR),
+    ...unwrap(uniswapR),
     ...getMidas(),
   ].filter(e => e.apr > 0)
 
