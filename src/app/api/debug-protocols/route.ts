@@ -1,413 +1,231 @@
 import { NextResponse } from 'next/server'
-import { rpcBatch, getMonPrice } from '@/lib/monad'
+import { rpcBatch } from '@/lib/monad'
 
 export const revalidate = 0
 
-// ─── Helpers (copied from defi/route.ts) ──────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function ethCall(to: string, data: string, id: number) {
   return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
+}
+function getLogs(address: string, topics: string[], fromBlock: string, id: number) {
+  return { jsonrpc: '2.0', id, method: 'eth_getLogs', params: [{ address, topics, fromBlock, toBlock: 'latest' }] }
 }
 function decodeUint(hex: string): bigint {
   if (!hex || hex === '0x') return 0n
   try { return BigInt(hex.startsWith('0x') ? hex : '0x' + hex) } catch { return 0n }
 }
-function balanceOfData(addr: string): string {
-  return '0x70a08231' + addr.slice(2).toLowerCase().padStart(64, '0')
+function decodeAddress(hex: string): string {
+  if (!hex || hex.length < 66) return '0x0'
+  return '0x' + hex.slice(hex.length - 40)
 }
-
-// ─── Test runner helper ────────────────────────────────────────────────────────
-async function test(
-  name: string,
-  fn: () => Promise<unknown>,
-): Promise<ProtocolStatus> {
-  const start = Date.now()
+function decodeString(hex: string): string {
+  if (!hex || hex === '0x' || hex.length < 4) return ''
   try {
-    const result = await fn()
-    const duration = Date.now() - start
-    const isArray  = Array.isArray(result)
-    const count    = isArray ? result.length : (result ? 1 : 0)
-    return {
-      protocol: name,
-      status:   'ok',
-      duration,
-      count,
-      sample:   isArray ? result.slice(0, 2) : result,
-      error:    null,
+    const raw = hex.startsWith('0x') ? hex.slice(2) : hex
+    const bytes = Buffer.from(raw, 'hex')
+    // Try ABI-encoded string: offset(32) + length(32) + data
+    if (bytes.length >= 96) {
+      const len = Number(bytes.readBigUInt64BE(56))
+      if (len > 0 && len <= 200) {
+        return bytes.slice(64, 64 + len).toString('utf8').replace(/\0/g, '')
+      }
     }
-  } catch (err: unknown) {
-    return {
-      protocol: name,
-      status:   'error',
-      duration: Date.now() - start,
-      count:    0,
-      sample:   null,
-      error:    err instanceof Error ? err.message : String(err),
-    }
+    // Short packed string
+    const trimmed = bytes.toString('utf8').replace(/\0/g, '').trim()
+    return trimmed.length > 0 && trimmed.length < 50 ? trimmed : ''
+  } catch { return '' }
+}
+function padUint(n: number): string { return n.toString(16).padStart(64, '0') }
+function padAddr(addr: string): string { return addr.slice(2).toLowerCase().padStart(64, '0') }
+async function tryFetch(url: string): Promise<{ status: number; ok: boolean; body: any; error?: string }> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
+    let body: any = null
+    try { body = await res.json() } catch { body = await res.text().catch(() => null) }
+    return { status: res.status, ok: res.ok, body }
+  } catch (e: any) {
+    return { status: 0, ok: false, body: null, error: e.message }
   }
 }
 
-export interface ProtocolStatus {
-  protocol: string
-  status:   'ok' | 'error' | 'empty'
-  duration: number   // ms
-  count:    number   // entries returned
-  sample:   unknown  // first 1-2 entries for inspection
-  error:    string | null
-}
+// ─── CURVE: On-chain MetaRegistry enumeration ─────────────────────────────────
+async function debugCurve(user: string) {
+  const META_REGISTRY  = '0xe6da14500f0b5783e2325f9c5a7ee5d99da0fb42'
+  const ADDR_PROVIDER  = '0x4574921eb950d3fd5b01562162ec566cb8bc3648'
 
-// ─── Protocol-specific test functions ─────────────────────────────────────────
+  // Pool count
+  const countRes = await rpcBatch([
+    ethCall(META_REGISTRY, '0x92a4419f', 1),
+    ethCall(ADDR_PROVIDER,  '0x92a4419f', 2),
+  ])
+  const metaPoolCount = Number(decodeUint(countRes[0]?.result ?? '0x'))
+  const apPoolCount   = Number(decodeUint(countRes[1]?.result ?? '0x'))
 
-// 1. Morpho GraphQL
-async function testMorpho(user: string) {
-  const query = `query($addr:String!,$cid:Int!){userByAddress(address:$addr,chainId:$cid){marketPositions{market{uniqueKey loanAsset{symbol}collateralAsset{symbol}state{supplyApy borrowApy}}supplyAssetsUsd borrowAssetsUsd collateralUsd healthFactor}vaultPositions{vault{name symbol state{netApy}}assetsUsd}}}`
-  const res = await fetch('https://api.morpho.org/graphql', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables: { addr: user.toLowerCase(), cid: 143 } }),
-    signal: AbortSignal.timeout(12_000), cache: 'no-store',
-  })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const data = await res.json()
-  if (data.errors?.length) throw new Error(data.errors[0].message)
-  const u = data?.data?.userByAddress
+  // Enumerate first 10 pools
+  const poolsToCheck = Math.min(metaPoolCount, 10)
+  const poolListCalls = Array.from({ length: poolsToCheck }, (_, i) =>
+    ethCall(META_REGISTRY, '0x3a1d5d8e' + padUint(i), 100 + i)
+  )
+  const poolListRes = poolsToCheck > 0 ? await rpcBatch(poolListCalls) : []
+  const poolAddresses = poolListRes
+    .map(r => decodeAddress(r?.result ?? '0x'))
+    .filter(a => a !== '0x0' && a !== '0x0000000000000000000000000000000000000000')
+
+  // For each pool: LP token, name, totalSupply, user LP balance
+  const poolInfoCalls: any[] = []
+  for (let i = 0; i < poolAddresses.length; i++) {
+    const pool = poolAddresses[i]
+    poolInfoCalls.push(
+      ethCall(META_REGISTRY, '0xd9af49b5' + padAddr(pool), 200 + i * 4), // get_lp_token(pool)
+      ethCall(pool,          '0x06fdde03',                  201 + i * 4), // name()
+      ethCall(pool,          '0x18160ddd',                  202 + i * 4), // totalSupply()
+      ethCall(pool,          '0x70a08231' + padAddr(user),  203 + i * 4), // balanceOf(user)
+    )
+  }
+  const poolInfoRes = poolInfoCalls.length > 0 ? await rpcBatch(poolInfoCalls) : []
+
+  const pools = poolAddresses.map((pool, i) => ({
+    pool,
+    lpToken:     decodeAddress(poolInfoRes[i * 4]?.result ?? '0x'),
+    name:        decodeString(poolInfoRes[i * 4 + 1]?.result ?? '0x'),
+    totalSupply: decodeUint(poolInfoRes[i * 4 + 2]?.result ?? '0x').toString(),
+    userBalance: decodeUint(poolInfoRes[i * 4 + 3]?.result ?? '0x').toString(),
+    rawResults:  {
+      lpToken: poolInfoRes[i * 4]?.result?.slice(0, 66),
+      name:    poolInfoRes[i * 4 + 1]?.result?.slice(0, 130),
+    },
+  }))
+
   return {
-    marketPositions: u?.marketPositions?.length ?? 0,
-    vaultPositions:  u?.vaultPositions?.length  ?? 0,
-    raw: u,
+    metaPoolCount,
+    apPoolCount,
+    pools,
+    note: `MetaRegistry has ${metaPoolCount} pools. Showing first ${poolsToCheck}.`,
   }
 }
 
-// 2. Neverland (Aave V3 fork) — getUserAccountData + token balances
-const NEVERLAND_POOL = '0x80F00661b13CC5F6ccd3885bE7b4C9c67545D585'
-const NEVERLAND_SUPPLY_TOKENS = [
-  '0xD0fd2Cf7F6CEff4F96B1161F5E995D5843326154',
-  '0x34c43684293963c546b0aB6841008A4d3393B9ab',
-  '0x31f63Ae5a96566b93477191778606BeBDC4CA66f',
-  '0x784999fc2Dd132a41D1Cc0F1aE9805854BaD1f2D',
-  '0x38648958836eA88b368b4ac23b86Ad44B0fe7508',
-  '0x39F901c32b2E0d25AE8DEaa1ee115C748f8f6bDf',
-  '0xdFC14d336aea9E49113b1356333FD374e646Bf85',
-  '0x7f81779736968836582D31D36274Ed82053aD1AE',
-  '0xC64d73Bb8748C6fA7487ace2D0d945B6fBb2EcDe',
-]
-async function testNeverland(user: string) {
-  const calls = [
-    ethCall(NEVERLAND_POOL, '0xbf92857c' + user.slice(2).toLowerCase().padStart(64, '0'), 0),
-    ...NEVERLAND_SUPPLY_TOKENS.map((a, i) => ethCall(a, balanceOfData(user), i + 1)),
+// ─── KURU: Deep contract introspection + event scan ───────────────────────────
+async function debugKuru(user: string) {
+  const PROXY1  = '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923'
+  const PROXY2  = '0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a'
+  const IMPL    = '0x7c576409b1d039f6c218ef9dab88c88f39326cff'
+  const MARGIN  = '0x2a68ba1833cdf93fa9da1eebd7f46242ad8e90c5'
+
+  const selectors: [string, string][] = [
+    ['name()',             '0x06fdde03'],
+    ['symbol()',           '0x95d89b41'],
+    ['decimals()',         '0x313ce567'],
+    ['totalSupply()',      '0x18160ddd'],
+    ['totalAssets()',      '0x01e1d114'],
+    ['asset()',            '0x38d52e0f'],
+    ['owner()',            '0x8da5cb5b'],
+    ['getReserves()',      '0x0902f1ac'],
+    ['baseToken()',        '0xc55dae63'],
+    ['quoteToken()',       '0x9efec935'],
+    ['balanceOf(user)',    '0x70a08231' + padAddr(user)],
   ]
-  const results = await rpcBatch(calls)
-  const acctData = results[0]?.result
-  const hasAcct  = acctData && acctData !== '0x' && acctData.length > 10
-  const nonZeroBalances = NEVERLAND_SUPPLY_TOKENS.filter((_, i) => {
-    const r = results[i + 1]?.result
-    return r && r !== '0x' && decodeUint(r) > 0n
-  }).length
-  return { rpcCallsSuccess: results.length, hasAccountData: hasAcct, nonZeroSupplyTokens: nonZeroBalances }
-}
 
-// 3. Uniswap V3
-const UNI_NFT_PM = '0x7197e214c0b767cfb76fb734ab638e2c192f4e53'
-async function testUniswapV3(user: string) {
-  const res = await rpcBatch([ethCall(UNI_NFT_PM, balanceOfData(user), 1)])
-  const count = Number(decodeUint(res[0]?.result ?? '0x'))
-  return { nftPositionCount: count, nftPM: UNI_NFT_PM }
-}
-
-// 4. PancakeSwap V3
-const PCAKE_NFT_PM = '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364'
-async function testPancakeSwap(user: string) {
-  const res = await rpcBatch([ethCall(PCAKE_NFT_PM, balanceOfData(user), 1)])
-  const count = Number(decodeUint(res[0]?.result ?? '0x'))
-  return { nftPositionCount: count, nftPM: PCAKE_NFT_PM }
-}
-
-// 5. Curve
-// The Curve API uses chain slugs from their internal registry
-// UI uses /dex/monad/ → slug is "monad"
-const CURVE_SLUGS_TO_TRY = ['monad', 'monad-mainnet', 'monad_mainnet']
-async function testCurve(user: string) {
-  const tried: Record<string, unknown> = {}
-  for (const slug of CURVE_SLUGS_TO_TRY) {
-    const url = `https://api.curve.fi/v1/getLiquidityProviderData/${user.toLowerCase()}/${slug}`
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: 'no-store' })
-      tried[slug] = { status: res.status, ok: res.ok }
-      if (res.ok) {
-        const data = await res.json()
-        const lp = data?.data?.lpData ?? []
-        return { found: true, slug, positionCount: lp.length, active: lp.filter((p: any) => Number(p.liquidityUsd ?? 0) > 0).length }
-      }
-    } catch (e: unknown) {
-      tried[slug] = { error: e instanceof Error ? e.message : String(e) }
-    }
+  const addresses = [PROXY1, PROXY2, IMPL, MARGIN]
+  const calls: any[] = []
+  let id = 0
+  for (const addr of addresses) {
+    for (const [, data] of selectors) calls.push(ethCall(addr, data, id++))
   }
-  return { found: false, note: 'No working Curve chain slug found', tried }
-}
+  const rpc = await rpcBatch(calls)
 
-// 6. Gearbox
-// Gearbox Permissionless on Monad — try multiple API patterns
-// The classic "third-eye" API used {chain}.gearbox-api.com but Monad subdomain doesn't exist
-// Permissionless version may use a different API base
-const GEARBOX_ENDPOINTS_TO_TRY = [
-  `https://api.gearbox.finance/api/v1/user/{user}/pools?chainId=143`,
-  `https://api.gearbox.fi/api/v1/pools?chainId=143`,
-  `https://permissionless-api.gearbox.foundation/api/v1/pools?chainId=143`,
-  `https://monad.gearbox-api.com/api/v1/pools`,
-]
-async function testGearbox(user: string) {
-  const tried: Record<string, unknown> = {}
-  for (const template of GEARBOX_ENDPOINTS_TO_TRY) {
-    const url = template.replace('{user}', user.toLowerCase())
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      tried[url] = { status: res.status, ok: res.ok }
-      if (res.ok) {
-        const data = await res.json()
-        return { found: true, endpoint: url, data }
-      }
-    } catch (e: unknown) {
-      tried[url] = { error: e instanceof Error ? e.message : String(e) }
-    }
+  const perAddress: Record<string, any> = {}
+  addresses.forEach((addr, ai) => {
+    const results: Record<string, string> = {}
+    selectors.forEach(([name], si) => {
+      const res = rpc[ai * selectors.length + si]?.result ?? '0x'
+      results[name] = res === '0x' ? 'empty/revert' : res.slice(0, 66)
+    })
+    perAddress[addr] = results
+  })
+
+  // Check ERC4626 Deposit events
+  const DEPOSIT_TOPIC = '0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7'
+  const logRes = await rpcBatch([
+    getLogs(PROXY1, [DEPOSIT_TOPIC], '0x0', 800),
+    getLogs(PROXY2, [DEPOSIT_TOPIC], '0x0', 801),
+  ])
+
+  return {
+    contracts: { proxy1: PROXY1, proxy2: PROXY2, impl: IMPL, margin: MARGIN },
+    selectorResults: perAddress,
+    depositEvents: {
+      proxy1: Array.isArray(logRes[0]?.result) ? logRes[0].result.length + ' events found' : logRes[0]?.error ?? 'no events',
+      proxy2: Array.isArray(logRes[1]?.result) ? logRes[1].result.length + ' events found' : logRes[1]?.error ?? 'no events',
+    },
+    note: 'If all selectors return empty/revert, these are NOT LP vaults — just DEX infrastructure',
   }
-  return { found: false, note: 'Gearbox Permissionless API URL unknown — all patterns failed', tried }
 }
 
-// 7. Upshift
-const UPSHIFT_VAULT = '0x103222f020e98Bba0AD9809A011FDF8e6F067496'
-async function testUpshift(user: string) {
-  const res = await rpcBatch([ethCall(UPSHIFT_VAULT, balanceOfData(user), 1)])
-  const shares = decodeUint(res[0]?.result ?? '0x')
-  return { vaultAddress: UPSHIFT_VAULT, sharesBalance: shares.toString(), hasBalance: shares > 0n }
-}
-
-// 8. Kintsu
-const KINTSU_SMON = '0xA3227C5969757783154C60bF0bC1944180ed81B9'
-async function testKintsu(user: string) {
-  const res = await rpcBatch([ethCall(KINTSU_SMON, balanceOfData(user), 1)])
-  const shares = decodeUint(res[0]?.result ?? '0x')
-  return { sMONAddress: KINTSU_SMON, sharesBalance: (Number(shares) / 1e18).toFixed(6), hasBalance: shares > 0n }
-}
-
-// 9. Magma
-const MAGMA_GMON = '0x8498312a6b3CBD158Bf0c93ABdcF29E6e4f55081'
-async function testMagma(user: string) {
-  const res = await rpcBatch([ethCall(MAGMA_GMON, balanceOfData(user), 1)])
-  const shares = decodeUint(res[0]?.result ?? '0x')
-  return { gMONAddress: MAGMA_GMON, sharesBalance: (Number(shares) / 1e18).toFixed(6), hasBalance: shares > 0n }
-}
-
-// 10. shMonad
-const SHMONAD_ADDR = '0x1B68626dCa36c7fE922fD2d55E4f631d962dE19c'
-async function testShMonad(user: string) {
-  const res = await rpcBatch([ethCall(SHMONAD_ADDR, balanceOfData(user), 1)])
-  const shares = decodeUint(res[0]?.result ?? '0x')
-  return { shMONAddress: SHMONAD_ADDR, sharesBalance: (Number(shares) / 1e18).toFixed(6), hasBalance: shares > 0n }
-}
-
-// 11. Lagoon
-// Lagoon is an ERC7540 vault protocol confirmed with $3.42M TVL on Monad
-// Their architecture is permissionless (BeaconProxyFactory) — no fixed list of vaults
-// Trying REST API patterns first, then on-chain fallback with placeholder addresses
-async function testLagoon(user: string) {
-  const addr = user.toLowerCase()
-  const endpoints = [
-    `https://api.lagoon.finance/api/v1/positions?address=${addr}&chainId=143`,
-    `https://api.lagoon.finance/api/v1/vaults?address=${addr}&network=monad`,
-    `https://app.lagoon.finance/api/positions?address=${addr}&chainId=143`,
+// ─── LAGOON: REST API + factory search ────────────────────────────────────────
+async function debugLagoon(user: string) {
+  const apiResults: Record<string, any> = {}
+  const urls = [
+    'https://api.lagoon.finance/api/v1/vaults',
+    'https://api.lagoon.finance/api/v1/health',
+    `https://api.lagoon.finance/api/v1/positions?address=${user}&chainId=143`,
   ]
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      if (res.ok) {
-        const data = await res.json()
-        return { found: true, note: `REST API worked: ${url}`, data }
-      }
-    } catch { /* try next */ }
+  for (const url of urls) {
+    const r = await tryFetch(url)
+    apiResults[url] = { status: r.status, error: r.error, bodySnippet: JSON.stringify(r.body)?.slice(0, 200) }
   }
-  return { found: false, note: 'Lagoon REST API not accessible — no public on-chain vault list for Monad yet. Vault addresses needed from app.lagoon.finance/vault/143/*', tried: endpoints }
-}
 
-// 12. Renzo
-// Renzo on Monad may be a different product than ETH restaking
-// Try their API with Monad chain ID, and also check if they have a staking token on-chain
-const RENZO_ENDPOINTS_TO_TRY = [
-  'https://app.renzoprotocol.com/api/portfolio?chainId=143',
-  'https://api.renzoprotocol.com/v1/portfolio?chainId=143',
-  'https://api.renzoprotocol.com/portfolio/monad',
-]
-async function testRenzo(user: string) {
-  const results: Record<string, unknown> = {}
-  for (const url of RENZO_ENDPOINTS_TO_TRY) {
-    try {
-      const res = await fetch(url.includes('portfolio') ? `${url}&address=${user}` : url,
-        { signal: AbortSignal.timeout(6_000), cache: 'no-store' })
-      results[url] = { status: res.status, ok: res.ok }
-      if (res.ok) {
-        const data = await res.json()
-        return { found: true, endpoint: url, data }
-      }
-    } catch (e: unknown) {
-      results[url] = { error: e instanceof Error ? e.message : String(e) }
-    }
-  }
-  return { found: false, note: 'All known Renzo endpoints failed for Monad chainId=143', tried: results }
-}
-
-// 13. Kuru
-// Official Monad mainnet contracts from monad-crypto/protocols repository:
-// Vault:  0x4869a4c7657cef5e5496c9ce56dde4cd593e4923
-// Vault2: 0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a
-// Querying these as ERC4626-like vaults (balanceOf + totalAssets + totalSupply)
-const KURU_VAULT_CONTRACTS = [
-  '0x4869a4c7657cef5e5496c9ce56dde4cd593e4923',
-  '0xd6eae39b96fbdb7daa2227829be34b4e1bc9069a',
-]
-async function testKuru(user: string) {
-  try {
-    const calls = KURU_VAULT_CONTRACTS.flatMap((addr, i) => [
-      { jsonrpc: '2.0', id: 1000 + i * 3, method: 'eth_call', params: [{ to: addr, data: '0x70a08231' + user.slice(2).toLowerCase().padStart(64, '0') }, 'latest'] },
-      { jsonrpc: '2.0', id: 1001 + i * 3, method: 'eth_call', params: [{ to: addr, data: '0x01e1d114' }, 'latest'] }, // totalAssets
-      { jsonrpc: '2.0', id: 1002 + i * 3, method: 'eth_call', params: [{ to: addr, data: '0x18160ddd' }, 'latest'] }, // totalSupply
-    ])
-    const res = await fetch('https://rpc.monad.xyz', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(calls),
-      signal: AbortSignal.timeout(8_000),
-    })
-    const data: any[] = await res.json()
-    const vaultData = KURU_VAULT_CONTRACTS.map((addr, i) => {
-      const balHex = data.find((r: any) => r.id === 1000 + i * 3)?.result ?? '0x'
-      const assetsHex = data.find((r: any) => r.id === 1001 + i * 3)?.result ?? '0x'
-      const supplyHex = data.find((r: any) => r.id === 1002 + i * 3)?.result ?? '0x'
-      const bal = balHex !== '0x' ? BigInt(balHex).toString() : '0'
-      const assets = assetsHex !== '0x' ? BigInt(assetsHex).toString() : '0'
-      const supply = supplyHex !== '0x' ? BigInt(supplyHex).toString() : '0'
-      return { vault: addr, balance: bal, totalAssets: assets, totalSupply: supply, hasBalance: bal !== '0' }
-    })
-    return { found: true, note: 'Using real vault contract addresses from monad-crypto/protocols', vaults: vaultData }
-  } catch (e: unknown) {
-    return { found: false, error: e instanceof Error ? e.message : String(e), note: 'RPC call failed' }
-  }
-}
-
-// 14. Curvance
-const CURVANCE_CTOKENS = [
-  { address: '0xD9E2025b907E95EcC963A5018f56B87575B4aB26', underlying: 'aprMON' },
-  { address: '0x926C101Cf0a3dE8725Eb24a93E980f9FE34d6230', underlying: 'shMON'  },
-  { address: '0x494876051B0E85dCe5ecd5822B1aD39b9660c928', underlying: 'sMON'   },
-  { address: '0x5ca6966543c0786f547446234492d2f11c82f11f', underlying: 'gMON'   },
-]
-async function testCurvance(user: string) {
-  const calls = CURVANCE_CTOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i))
-  const results = await rpcBatch(calls)
-  const balances = CURVANCE_CTOKENS.map((t, i) => ({
-    token: t.underlying,
-    address: t.address,
-    balance: (Number(decodeUint(results[i]?.result ?? '0x')) / 1e18).toFixed(6),
+  // Check bytecode on candidate factory addresses
+  const candidates = [
+    '0x186986f1C5Ff2E21B18E4e29B1B7E3FC3aF1d61',
+    '0x3e5FEB6a59c7dc4b8dedfee63f63de39b5e18F5',
+  ]
+  const codeCalls = candidates.map((addr, i) => ({
+    jsonrpc: '2.0', id: i + 1, method: 'eth_getCode', params: [addr, 'latest']
   }))
-  return { rpcCallsSuccess: results.length, collateralTokens: balances }
-}
-
-// 15. Euler V2
-// Euler V2 uses Goldsky subgraphs, one per chain
-// Monad is not in their official list yet, trying the pattern euler-v2-monad
-const EULER_ENDPOINTS_TO_TRY = [
-  'https://api.goldsky.com/api/public/project_cm4iagnemt1wp01xn4gh1agft/subgraphs/euler-v2-monad/latest/gn',
-  'https://api.goldsky.com/api/public/project_cm4iagnemt1wp01xn4gh1agft/subgraphs/euler-v2-monad-mainnet/latest/gn',
-  'https://api.euler.finance/graphql',  // try their centralized API too
-]
-const EULER_QUERY = `query($account:String!){
-  trackingActiveAccount(id:$account){mainAddress deposits borrows}
-}`
-async function testEulerV2(user: string) {
-  const results: Record<string, unknown> = {}
-  for (const url of EULER_ENDPOINTS_TO_TRY) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: EULER_QUERY, variables: { account: user.toLowerCase() } }),
-        signal: AbortSignal.timeout(10_000), cache: 'no-store',
-      })
-      const status = res.status
-      results[url] = { status, ok: res.ok }
-      if (res.ok) {
-        const data = await res.json()
-        if (!data.errors?.length) {
-          return { found: true, endpoint: url, data: data?.data, note: 'Goldsky subgraph found' }
-        }
-        results[url] = { status, graphqlError: data.errors?.[0]?.message }
-      }
-    } catch (e: unknown) {
-      results[url] = { error: e instanceof Error ? e.message : String(e) }
-    }
-  }
-  return { found: false, note: 'No Euler V2 Monad subgraph found yet (not in official Goldsky list)', tried: results }
-}
-
-// 16. Midas
-// IMPORTANT: Addresses below are PLACEHOLDERS — Midas docs only list ETH/Base addresses
-// Check docs.midas.app/resources/smart-contracts-addresses for Monad deployment (may not exist yet)
-// Also check MonadScan by searching for "mTBILL" or "mBASIS" tokens
-const MIDAS_TOKENS = [
-  { address: '0x8a0e8e76A5c7Cd21deb5A0975eCb8C7C0bC1d7e5', symbol: 'mTBILL', note: '⚠️ placeholder — find real address on MonadScan' },
-  { address: '0x2e3421dEB8B0D640a2E3A9f4e2591B01A43e96F7', symbol: 'mBASIS', note: '⚠️ placeholder — find real address on MonadScan' },
-]
-async function testMidas(user: string) {
-  const calls = MIDAS_TOKENS.map((t, i) => ethCall(t.address, balanceOfData(user), i))
-  const results = await rpcBatch(calls)
-  const balances = MIDAS_TOKENS.map((t, i) => ({
-    token: t.symbol, address: t.address,
-    balance: (Number(decodeUint(results[i]?.result ?? '0x')) / 1e18).toFixed(6),
-    note: results[i]?.result === '0x' ? 'contract may not exist on Monad mainnet' : 'ok',
+  const codeRes = await rpcBatch(codeCalls)
+  const codeInfo = candidates.map((addr, i) => ({
+    address: addr,
+    hasCode: codeRes[i]?.result !== '0x',
+    codeLength: (codeRes[i]?.result?.length ?? 2) - 2,
   }))
-  return { rpcCallsSuccess: results.length, tokens: balances }
+
+  return {
+    apiResults,
+    factoryCandidates: codeInfo,
+    conclusion: 'Lagoon vault addresses needed — find via MonadScan deployer wallet or Lagoon docs',
+  }
+}
+
+// ─── GEARBOX ──────────────────────────────────────────────────────────────────
+async function debugGearbox(user: string) {
+  const urls = [
+    'https://api.gearbox.finance/api/v1/pools?chainId=143',
+    'https://api.gearbox.fi/api/v1/pools?chainId=143',
+  ]
+  const results: Record<string, any> = {}
+  for (const url of urls) {
+    const r = await tryFetch(url)
+    results[url] = { status: r.status, error: r.error }
+  }
+  return { networkBlocked: true, probes: results }
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 export async function GET(req: Request) {
-  const url     = new URL(req.url)
-  const address = url.searchParams.get('address') ?? '0x0000000000000000000000000000000000000001'
+  const url      = new URL(req.url)
+  const address  = url.searchParams.get('address') ?? '0x0000000000000000000000000000000000000001'
+  const protocol = url.searchParams.get('protocol')
 
-  // Run MON price check first (shared dependency)
-  let monPrice = 0
-  try { monPrice = await getMonPrice() } catch { /* skip */ }
+  if (protocol === 'curve')   return NextResponse.json(await debugCurve(address))
+  if (protocol === 'kuru')    return NextResponse.json(await debugKuru(address))
+  if (protocol === 'lagoon')  return NextResponse.json(await debugLagoon(address))
+  if (protocol === 'gearbox') return NextResponse.json(await debugGearbox(address))
 
-  // Run all 16 protocol tests in parallel
-  const results = await Promise.all([
-    test('1. Morpho',       () => testMorpho(address)),
-    test('2. Neverland',    () => testNeverland(address)),
-    test('3. Uniswap V3',   () => testUniswapV3(address)),
-    test('4. PancakeSwap V3', () => testPancakeSwap(address)),
-    test('5. Curve',        () => testCurve(address)),
-    test('6. Gearbox',      () => testGearbox(address)),
-    test('7. Upshift',      () => testUpshift(address)),
-    test('8. Kintsu',       () => testKintsu(address)),
-    test('9. Magma',        () => testMagma(address)),
-    test('10. shMonad',     () => testShMonad(address)),
-    test('11. Lagoon',      () => testLagoon(address)),
-    test('12. Renzo',       () => testRenzo(address)),
-    test('13. Kuru',        () => testKuru(address)),
-    test('14. Curvance',    () => testCurvance(address)),
-    test('15. Euler V2',    () => testEulerV2(address)),
-    test('16. Midas',       () => testMidas(address)),
+  const [curve, kuru, lagoon, gearbox] = await Promise.all([
+    debugCurve(address),
+    debugKuru(address),
+    debugLagoon(address),
+    debugGearbox(address),
   ])
-
-  // Mark entries with 0 results as 'empty' (different from 'error')
-  const final = results.map(r =>
-    r.status === 'ok' && r.count === 0 ? { ...r, status: 'empty' as const } : r
-  )
-
-  const summary = {
-    total:   final.length,
-    ok:      final.filter(r => r.status === 'ok').length,
-    empty:   final.filter(r => r.status === 'empty').length,
-    errors:  final.filter(r => r.status === 'error').length,
-    monPrice,
-    testedAddress: address,
-    timestamp: new Date().toISOString(),
-  }
-
-  return NextResponse.json({ summary, results: final })
+  return NextResponse.json({ curve, kuru, lagoon, gearbox })
 }
