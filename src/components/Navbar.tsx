@@ -26,9 +26,9 @@ export default function Navbar() {
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-40 glass border-b border-violet-100/60 h-16">
-      <div className="max-w-7xl mx-auto px-4 h-full flex items-center justify-between">
+      <div className="max-w-[1400px] mx-auto px-4 h-full grid grid-cols-[auto_1fr_auto] items-center gap-4">
 
-        {/* Logo */}
+        {/* Logo — hard left */}
         <Link href="/" className="flex items-center gap-2 shrink-0">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center shadow-lg shadow-violet-200">
             <Zap size={16} className="text-white" fill="white" />
@@ -38,42 +38,42 @@ export default function Navbar() {
           </span>
         </Link>
 
-        {/* Desktop nav */}
-        <div className="hidden md:flex items-center gap-1">
+        {/* Desktop nav — centered in middle column */}
+        <div className="hidden md:flex items-center justify-center gap-0.5">
           {navLinks.map(({ href, label, icon: Icon }) => {
             const isActive = pathname === href
             return (
               <Link key={href} href={href}
-                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                className={`flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-xs font-medium transition-all duration-200 whitespace-nowrap ${
                   isActive ? 'bg-violet-100 text-violet-700' : 'text-gray-600 hover:text-violet-700 hover:bg-violet-50'
                 }`}
               >
-                <Icon size={15} />
+                <Icon size={14} />
                 {label}
               </Link>
             )
           })}
         </div>
 
-        {/* Desktop wallet — RainbowKit ConnectButton */}
-        <div className="hidden md:flex items-center">
-          <ConnectButton
-            showBalance={false}
-            chainStatus="none"
-            accountStatus={{
-              smallScreen: 'avatar',
-              largeScreen: 'full',
-            }}
-          />
+        {/* Wallet + Mobile toggle — hard right */}
+        <div className="flex items-center gap-2 justify-end shrink-0">
+          <div className="hidden md:flex items-center">
+            <ConnectButton
+              showBalance={false}
+              chainStatus="none"
+              accountStatus={{
+                smallScreen: 'avatar',
+                largeScreen: 'full',
+              }}
+            />
+          </div>
+          <button
+            className="md:hidden p-2 rounded-lg text-gray-600 hover:bg-violet-50 transition-colors"
+            onClick={() => setMobileOpen(!mobileOpen)}
+          >
+            {mobileOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
         </div>
-
-        {/* Mobile toggle */}
-        <button
-          className="md:hidden p-2 rounded-lg text-gray-600 hover:bg-violet-50 transition-colors"
-          onClick={() => setMobileOpen(!mobileOpen)}
-        >
-          {mobileOpen ? <X size={20} /> : <Menu size={20} />}
-        </button>
       </div>
 
       {/* Mobile menu */}
