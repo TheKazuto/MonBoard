@@ -36,8 +36,23 @@ function TokenPills({ tokens }: { tokens: string[] }) {
   )
 }
 
+// ─── Type badge (pool / lend / vault) ────────────────────────────────────────
+const TYPE_CONFIG: Record<string, { label: string; color: string }> = {
+  pool:  { label: 'Pool',  color: 'bg-blue-50   text-blue-600   border-blue-100'   },
+  lend:  { label: 'Lend',  color: 'bg-amber-50  text-amber-600  border-amber-100'  },
+  vault: { label: 'Vault', color: 'bg-violet-50 text-violet-600 border-violet-100' },
+}
+function TypeBadge({ type }: { type: string }) {
+  const cfg = TYPE_CONFIG[type] ?? { label: type, color: 'bg-gray-50 text-gray-500 border-gray-100' }
+  return (
+    <span className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${cfg.color}`}>
+      {cfg.label}
+    </span>
+  )
+}
+
 // ─── Single APR card ──────────────────────────────────────────────────────────
-function AprCard({ entry, rank }: { entry: AprEntry; rank: number }) {
+function AprCard({ entry, rank, showType = false }: { entry: AprEntry; rank: number; showType?: boolean }) {
   return (
     <div className="card p-4 flex items-center gap-4 hover:shadow-md transition-all duration-200">
       {/* Rank */}
@@ -50,6 +65,7 @@ function AprCard({ entry, rank }: { entry: AprEntry; rank: number }) {
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-base">{entry.logo}</span>
           <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">{entry.protocol}</span>
+          {showType && <TypeBadge type={entry.type} />}
         </div>
         <p className="text-sm font-semibold text-gray-800 truncate mb-1.5" style={SORA}>{entry.label}</p>
         <TokenPills tokens={entry.tokens} />
@@ -210,7 +226,7 @@ export default function BestAprsPage() {
       {data && !loading && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
           {[
-            { label: 'Stable APRs', value: data.stableAPRs.length, icon: '🏦', best: data.stableAPRs[0]?.apr },
+            { label: 'Stablecoins', value: data.stableAPRs.length, icon: '🏦', best: data.stableAPRs[0]?.apr },
             { label: 'Pools',       value: data.pools.length,       icon: '🌊', best: data.pools[0]?.apr       },
             { label: 'Vaults',      value: data.vaults.length,      icon: '🔒', best: data.vaults[0]?.apr      },
             { label: 'Lend',        value: data.lends.length,       icon: '📊', best: data.lends[0]?.apr       },
@@ -237,7 +253,7 @@ export default function BestAprsPage() {
         <div className="card p-5">
           <SectionHeader
             icon={<Coins size={18} className="text-emerald-600" />}
-            title="Trending Stable APR"
+            title="Trending Stablecoin"
             count={data?.stableAPRs.length ?? 0}
             accent="bg-emerald-50"
           />
@@ -245,7 +261,7 @@ export default function BestAprsPage() {
             ? <SectionSkeleton count={5} />
             : data?.stableAPRs.length
               ? <div className="space-y-3">
-                  {data.stableAPRs.map((e, i) => <AprCard key={`stable-${i}`} entry={e} rank={i + 1} />)}
+                  {data.stableAPRs.map((e, i) => <AprCard key={`stable-${i}`} entry={e} rank={i + 1} showType />)}
                 </div>
               : <Empty label="stable" />
           }

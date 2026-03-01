@@ -483,11 +483,11 @@ export async function GET() {
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
 
-  // Stable APRs: lend with stable token OR pool where all tokens are stables
+  // Stablecoin APRs: lend, pool or vault where all tokens are stablecoins
   const stableAPRs = all
-    .filter(e => e.isStable && (e.type === 'lend' || e.type === 'pool'))
+    .filter(e => e.isStable)
     .sort(byApr)
-    .slice(0, 5)
+    .slice(0, 10)
 
   const pools  = all.filter(e => e.type === 'pool').sort(byApr).slice(0, 10)
   const vaults = all.filter(e => e.type === 'vault').sort(byApr).slice(0, 10)
