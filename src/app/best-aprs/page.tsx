@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, ExternalLink, TrendingUp, Zap, Layers, BookOpen, Coins } from 'lucide-react'
 import { SORA } from '@/lib/styles'
+import AdBanner from '@/components/AdBanner'
 import type { AprEntry } from '@/app/api/best-aprs/route'
 
 // ─── Auto-refresh interval ────────────────────────────────────────────────────
@@ -270,16 +271,7 @@ export default function BestAprsPage() {
           </div>
 
           {/* ── Google Ad slot — fills remaining space to align with Trending Pools ── */}
-          <div className="card flex-1 min-h-[250px] flex items-center justify-center overflow-hidden">
-            <ins
-              className="adsbygoogle block w-full h-full"
-              data-ad-client="ca-pub-XXXXXXXXXXXXXXXX"
-              data-ad-slot="XXXXXXXXXX"
-              data-ad-format="auto"
-              data-full-width-responsive="true"
-              style={{ display: 'block' }}
-            />
-          </div>
+          <AdBanner className="flex-1 min-h-[250px]" />
         </div>
 
         {/* ── RIGHT COLUMN: Trending Pools ── */}

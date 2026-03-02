@@ -9,6 +9,7 @@ import {
   ExternalLink, LayoutGrid, List,
 } from 'lucide-react'
 import PortfolioHistory from '@/components/PortfolioHistory'
+import AdBanner from '@/components/AdBanner'
 import { SORA } from '@/lib/styles'
 import { fmtUSD } from '@/lib/format'
 
@@ -310,16 +311,7 @@ export default function PortfolioPage() {
           <PortfolioHistory />
 
           {/* ── Google Ad slot ────────────────────────────────────────────── */}
-          <div className="card min-h-[120px] flex items-center justify-center overflow-hidden">
-            <ins
-              className="adsbygoogle block w-full h-full"
-              data-ad-client="ca-pub-XXXXXXXXXXXXXXXX"
-              data-ad-slot="XXXXXXXXXX"
-              data-ad-format="horizontal"
-              data-full-width-responsive="true"
-              style={{ display: 'block', minHeight: '90px' }}
-            />
-          </div>
+          <AdBanner className="min-h-[120px]" />
 
           {/* ── Tokens table ─────────────────────────────────────────────── */}
           <div className="card overflow-hidden">
