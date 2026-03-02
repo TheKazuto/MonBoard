@@ -336,10 +336,10 @@ export default function TransactionsPage() {
               </div>
               <h3 className="font-bold text-gray-800 mb-1" style={SORA}>Premium Feature</h3>
               <p className="text-sm text-gray-500 mb-4">
-                Hold a <strong className="text-violet-700">MonBoard NFT</strong> to monitor wallets and receive Telegram alerts.
+                Soon you will be able to monitor wallets and receive alerts from Telegram.
               </p>
-              <button className="btn-primary text-sm px-5 py-2">Get Your NFT</button>
-              <p className="text-xs text-gray-400 mt-2">Collection launching soon</p>
+              <button className="btn-primary text-sm px-5 py-2">Coming soon</button>
+              <p className="text-xs text-gray-400 mt-2">News coming soon!</p>
             </div>
             <h2 className="font-semibold text-gray-800 mb-4" style={SORA}>
               <Eye size={16} className="inline mr-1.5 text-violet-500" />Watch Wallets
@@ -373,7 +373,7 @@ export default function TransactionsPage() {
             <div className="absolute inset-0 rounded-2xl flex flex-col items-center justify-center z-10 text-center p-6"
               style={{ background: 'rgba(250,249,255,0.93)', backdropFilter: 'blur(4px)' }}>
               <Lock size={20} className="text-violet-400 mb-2" />
-              <p className="text-xs text-gray-500">NFT required</p>
+              <p className="text-xs text-gray-500">Coming soon</p>
             </div>
             <h2 className="font-semibold text-gray-800 mb-3" style={SORA}>
               <Bell size={16} className="inline mr-1.5 text-violet-500" />Telegram Alerts
