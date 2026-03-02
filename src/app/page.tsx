@@ -300,21 +300,10 @@ function SponsorsBanner() {
         <h3 className="font-display font-semibold text-gray-800 text-sm" style={SORA}>
           Partners & Sponsors
         </h3>
-        <a href="mailto:partner@monboard.xyz" className="text-xs text-violet-600">Become a partner →</a>
+        <a href="https://forms.gle/2tqw8FWy1JD2Rd4s6" target="_blank" rel="noopener noreferrer" className="text-xs text-violet-600">Become a partner →</a>
       </div>
-      <div className="flex items-center justify-center gap-8 py-4 border border-dashed border-violet-200 rounded-xl">
-        {['MonadSwap', 'MonadLend', 'NadPets', 'MagicEden'].map(name => (
-          <div key={name} className="flex flex-col items-center gap-1 opacity-50 hover:opacity-100 transition-opacity cursor-pointer">
-            <div className="w-10 h-10 rounded-lg bg-violet-100 flex items-center justify-center text-lg">
-              {name === 'MonadSwap' ? '🔄' : name === 'MonadLend' ? '🏦' : name === 'NadPets' ? '🐾' : '✨'}
-            </div>
-            <span className="text-xs text-gray-500">{name}</span>
-          </div>
-        ))}
-        <div className="flex flex-col items-center gap-1 opacity-40 hover:opacity-80 transition-opacity cursor-pointer">
-          <div className="w-10 h-10 rounded-lg border-2 border-dashed border-violet-200 flex items-center justify-center text-violet-300 text-xl">+</div>
-          <span className="text-xs text-gray-400">Your Brand</span>
-        </div>
+      <div className="flex items-center justify-center gap-8 py-6 border border-dashed border-violet-200 rounded-xl">
+        <p className="text-sm text-gray-400 font-medium">Advertise your project here</p>
       </div>
     </div>
   )
