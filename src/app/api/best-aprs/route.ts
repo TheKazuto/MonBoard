@@ -512,22 +512,51 @@ async function fetchUniswapV4(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── PANCAKESWAP V3 — pools via explorer API ─────────────────────────────────
+// ─── MERKL — fetch reward APRs for Monad pools ──────────────────────────────
+async function fetchMerklRewardMap(): Promise<Map<string, number>> {
+  const map = new Map<string, number>()
+  try {
+    // Merkl returns LIVE reward campaigns on Monad (farming incentives)
+    const res = await fetch(
+      'https://api.merkl.xyz/v4/opportunities?chainId=143&action=POOL&status=LIVE&items=100',
+      { signal: AbortSignal.timeout(12_000), cache: 'no-store' },
+    )
+    if (!res.ok) return map
+    const opps: any[] = await res.json()
+    for (const o of opps) {
+      const addr = (o.identifier ?? '').toLowerCase()
+      const apr  = Number(o.apr ?? 0)
+      if (addr && apr > 0) {
+        // Accumulate in case multiple campaigns for same pool
+        map.set(addr, (map.get(addr) ?? 0) + apr)
+      }
+    }
+  } catch { /* ignore */ }
+  return map
+}
+
+// ─── PANCAKESWAP V3 — pools via explorer API + Merkl rewards ─────────────────
 async function fetchPancakeswap(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
-      'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
-      { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
-    )
-    if (!res.ok) return []
-    const data = await res.json()
+    // Fetch fee APR and Merkl reward APR in parallel
+    const [poolsRes, merklMap] = await Promise.all([
+      fetch(
+        'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
+        { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
+      ),
+      fetchMerklRewardMap(),
+    ])
+    if (!poolsRes.ok) return []
+    const data = await poolsRes.json()
     const rows: any[] = data?.rows ?? []
     const out: AprEntry[] = []
     for (const p of rows) {
       const tvl    = Number(p.tvlUSD ?? 0)
-      const apr24  = Number(p.apr24h ?? 0)
-      if (tvl < 100 || apr24 <= 0) continue
-      const apr = apr24 * 100  // api returns decimal (0.57 = 57%)
+      const feeApr = Number(p.apr24h ?? 0) * 100  // decimal → percentage
+      if (tvl < 100) continue
+      const poolAddr = (p.id ?? '').toLowerCase()
+      const rewardApr = merklMap.get(poolAddr) ?? 0
+      const apr = feeApr + rewardApr
       if (apr < 0.01) continue
       const t0 = p.token0?.symbol ?? '?'
       const t1 = p.token1?.symbol ?? '?'
@@ -535,10 +564,9 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
       const fee = Number(p.feeTier ?? 0)
       const feePct = fee / 10000
       const feeLabel = feePct >= 0.01 ? `${feePct}%` : `${fee / 100}bp`
-      const poolAddr = p.id ?? ''
       out.push({
         protocol: 'PancakeSwap V3', logo: '🥞',
-        url: `https://pancakeswap.finance/liquidity/pool/monad/${poolAddr}`,
+        url: `https://pancakeswap.finance/liquidity/pool/monad/${p.id ?? ''}`,
         tokens, label: `${t0}/${t1} ${feeLabel}`,
         apr, type: 'pool', isStable: allStable(tokens),
       })
