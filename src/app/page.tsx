@@ -284,10 +284,10 @@ function NFTGatingBanner() {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-violet-900">Unlock Telegram Alerts</p>
         <p className="text-xs text-violet-600 mt-0.5">
-          Hold a <strong>MonBoard NFT</strong> to get real-time wallet alerts via Telegram and monitor other wallets.
+          Soon you will be able to receive real-time wallet alerts via Telegram and monitor other wallets.
         </p>
       </div>
-      <button className="shrink-0 btn-primary text-xs px-4 py-2">Get NFT</button>
+      <button className="shrink-0 btn-primary text-xs px-4 py-2">Coming soon</button>
     </div>
   )
 }
