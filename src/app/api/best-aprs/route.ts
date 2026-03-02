@@ -627,7 +627,7 @@ export async function GET() {
   const stableAPRs = all
     .filter(e => e.isStable)
     .sort(byApr)
-    .slice(0, 10)
+    .slice(0, 5)
 
   const pools  = all.filter(e => e.type === 'pool').sort(byApr).slice(0, 10)
   const vaults = all.filter(e => e.type === 'vault').sort(byApr).slice(0, 10)

@@ -249,25 +249,40 @@ export default function BestAprsPage() {
       {/* ── Grid of sections ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-        {/* ── 1. Trending Stable APR ── */}
-        <div className="card p-5">
-          <SectionHeader
-            icon={<Coins size={18} className="text-emerald-600" />}
-            title="Trending Stablecoin"
-            count={data?.stableAPRs.length ?? 0}
-            accent="bg-emerald-50"
-          />
-          {loading
-            ? <SectionSkeleton count={5} />
-            : data?.stableAPRs.length
-              ? <div className="space-y-3">
-                  {data.stableAPRs.map((e, i) => <AprCard key={`stable-${i}`} entry={e} rank={i + 1} showType />)}
-                </div>
-              : <Empty label="stable" />
-          }
+        {/* ── LEFT COLUMN: Stablecoin + Ad ── */}
+        <div className="flex flex-col gap-6">
+          {/* ── 1. Trending Stable APR (5 positions) ── */}
+          <div className="card p-5">
+            <SectionHeader
+              icon={<Coins size={18} className="text-emerald-600" />}
+              title="Trending Stablecoin"
+              count={data?.stableAPRs.length ?? 0}
+              accent="bg-emerald-50"
+            />
+            {loading
+              ? <SectionSkeleton count={5} />
+              : data?.stableAPRs.length
+                ? <div className="space-y-3">
+                    {data.stableAPRs.map((e, i) => <AprCard key={`stable-${i}`} entry={e} rank={i + 1} showType />)}
+                  </div>
+                : <Empty label="stable" />
+            }
+          </div>
+
+          {/* ── Google Ad slot — fills remaining space to align with Trending Pools ── */}
+          <div className="card flex-1 min-h-[250px] flex items-center justify-center overflow-hidden">
+            <ins
+              className="adsbygoogle block w-full h-full"
+              data-ad-client="ca-pub-XXXXXXXXXXXXXXXX"
+              data-ad-slot="XXXXXXXXXX"
+              data-ad-format="auto"
+              data-full-width-responsive="true"
+              style={{ display: 'block' }}
+            />
+          </div>
         </div>
 
-        {/* ── 2. Trending Pools ── */}
+        {/* ── RIGHT COLUMN: Trending Pools ── */}
         <div className="card p-5">
           <SectionHeader
             icon={<Layers size={18} className="text-blue-600" />}
