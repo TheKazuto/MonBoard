@@ -309,6 +309,18 @@ export default function PortfolioPage() {
           {/* ── Portfolio History ─────────────────────────────────────────── */}
           <PortfolioHistory />
 
+          {/* ── Google Ad slot ────────────────────────────────────────────── */}
+          <div className="card min-h-[120px] flex items-center justify-center overflow-hidden">
+            <ins
+              className="adsbygoogle block w-full h-full"
+              data-ad-client="ca-pub-XXXXXXXXXXXXXXXX"
+              data-ad-slot="XXXXXXXXXX"
+              data-ad-format="horizontal"
+              data-full-width-responsive="true"
+              style={{ display: 'block', minHeight: '90px' }}
+            />
+          </div>
+
           {/* ── Tokens table ─────────────────────────────────────────────── */}
           <div className="card overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-gray-50">
