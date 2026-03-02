@@ -31,10 +31,7 @@ export default function AdBanner({ className = '' }: { className?: string }) {
         className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-violet-200 bg-violet-50/40 text-center p-4 ${className}`}
         style={{ minHeight: 80 }}
       >
-        <p className="text-xs text-violet-400 font-medium">Advertisement</p>
-        <p className="text-[10px] text-violet-300 mt-0.5">
-          Set <code className="font-mono">NEXT_PUBLIC_ADSENSE_CLIENT</code> to enable ads
-        </p>
+        <p className="text-xs text-violet-400 font-medium">Content coming soon</p>
       </div>
     )
   }
