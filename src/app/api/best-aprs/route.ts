@@ -22,14 +22,10 @@ const STABLECOINS = new Set([
 ])
 
 function isStable(sym: string): boolean { return STABLECOINS.has(sym) }
-function decodeUint(hex: string): bigint {
-  if (!hex || hex === '0x') return 0n
-  try { return BigInt(hex) } catch { return 0n }
-}
 function allStable(tokens: string[]): boolean { return tokens.length > 0 && tokens.every(isStable) }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-const MONAD_RPC  = 'https://rpc.monad.xyz'
+const MONAD_RPC = 'https://rpc.monad.xyz'
 
 function ethCall(to: string, data: string, id: number) {
   return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
@@ -46,20 +42,27 @@ function rayToApr(hex: string, wordIndex: number): number {
   } catch { return 0 }
 }
 
+// ─── Server-side cache ────────────────────────────────────────────────────────
+// Caches the full API response for CACHE_TTL ms. Deduplicates in-flight requests
+// so concurrent visitors share one set of external API calls.
+const CACHE_TTL = 3 * 60 * 1000 // 3 minutes
+
+interface CacheEntry {
+  data:      any
+  fetchedAt: number
+  promise:   Promise<any> | null
+}
+
+let serverCache: CacheEntry | null = null
+
 // ─── MORPHO — markets (lend) + vaults ────────────────────────────────────────
 // APY → APR conversion (daily compounding assumed)
-// APR = 365 × ((1 + APY)^(1/365) - 1)
-// For small values APY ≈ APR, but Morpho returns raw APY from the contract
 function apyToApr(apy: number): number {
   if (apy <= 0) return 0
   return 365 * (Math.pow(1 + apy, 1 / 365) - 1)
 }
 
 async function fetchMorpho(): Promise<AprEntry[]> {
-  // GraphQL confirmed at api.morpho.org/graphql for Monad (chainId 143)
-  // Note: removed whitelisted filter — not supported on Monad schema, breaks query
-  // supplyApy/netApy are returned as APY (not APR) — converted below
-  // Schema uses PaginatedMarkets/PaginatedMetaMorphos — fields are under .items
   const query = `{
     markets(where:{chainId_in:[143]}, first:100) {
       items {
@@ -90,9 +93,8 @@ async function fetchMorpho(): Promise<AprEntry[]> {
     const out: AprEntry[] = []
 
     for (const m of data?.data?.markets?.items ?? []) {
-      // supplyApy from API is already a decimal (e.g. 0.05 = 5%) — convert APY→APR
       const supplyApy = Number(m.state?.supplyApy ?? 0)
-      const supplyApr = apyToApr(supplyApy) * 100 // to percent
+      const supplyApr = apyToApr(supplyApy) * 100
       const loanSym   = m.loanAsset?.symbol ?? '?'
       const collSym   = m.collateralAsset?.symbol
       if (supplyApr < 0.01) continue
@@ -107,9 +109,8 @@ async function fetchMorpho(): Promise<AprEntry[]> {
       })
     }
     for (const v of data?.data?.vaults?.items ?? []) {
-      // netApy from API is a decimal — convert APY→APR
       const netApy = Number(v.state?.netApy ?? 0)
-      const netApr = apyToApr(netApy) * 100 // to percent
+      const netApr = apyToApr(netApy) * 100
       const sym    = v.asset?.symbol ?? '?'
       if (netApr < 0.01) continue
       const url = v.address
@@ -141,7 +142,6 @@ const NEVERLAND_ASSETS = [
 
 async function fetchNeverland(): Promise<AprEntry[]> {
   try {
-    // getReserveData(address asset) → 0x35ea6a75
     const calls = NEVERLAND_ASSETS.map((a, i) =>
       ethCall(NEVERLAND_POOL, '0x35ea6a75' + a.address.slice(2).toLowerCase().padStart(64, '0'), i)
     )
@@ -150,8 +150,6 @@ async function fetchNeverland(): Promise<AprEntry[]> {
 
     NEVERLAND_ASSETS.forEach((asset, i) => {
       const hex = results[i]?.result ?? ''
-      // Word 2 = currentLiquidityRate (supply) in RAY
-      // Word 4 = currentVariableBorrowRate in RAY
       const supplyApr = rayToApr(hex, 2)
       if (supplyApr < 0.01) return
       out.push({
@@ -196,32 +194,17 @@ async function fetchEulerV2(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── CURVE — pool APRs ────────────────────────────────────────────────────────
-// Method: on-chain TokenExchange events (same as Curve UI)
-//   APR = (volume_24h_usd × fee_rate × 365) / TVL_usd
-//
-// Sources tried in order:
-//   1. DeFiLlama free DEX API: /api/overview/dexs/Monad (no API key needed)
-//   2. On-chain TokenExchange events × fee() — definitive fallback
-//
-// DeFiLlama note (from docs study):
-//   /yields/pools is 🔒 Pro API (paid) — that's why it was blocked
-//   Free endpoints: /api/overview/dexs/{chain}, /api/summary/dexs/{protocol}
-//   Base URL for free: https://api.llama.fi (not pro-api.llama.fi)
-
+// ─── CURVE — pool APRs via virtualPrice delta ────────────────────────────────
 async function fetchCurve(): Promise<AprEntry[]> {
   const BASE       = 'https://api-core.curve.finance/v1'
-  const RPC        = 'https://rpc.monad.xyz'
   const BLOCKS_24H = 195_000 // Monad ~0.44s/block
 
   try {
-    // Step 1: Pool list + DeFiLlama free DEX API + block number (parallel)
-    const [r1, r2, llamaDex, bnRes] = await Promise.all([
+    // Pool list + block number (parallel) — removed unused DeFiLlama fetch
+    const [r1, r2, bnRes] = await Promise.all([
       fetch(`${BASE}/getPools/monad/factory-twocrypto`,  { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
       fetch(`${BASE}/getPools/monad/factory-stable-ng`, { signal: AbortSignal.timeout(10_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      // DeFiLlama free DEX volume API (no API key needed per docs)
-      fetch('https://api.llama.fi/summary/dexs/curve?dataType=dailyVolume', { signal: AbortSignal.timeout(8_000), cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch(RPC, {
+      fetch(MONAD_RPC, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_blockNumber', params: [] }),
         signal: AbortSignal.timeout(4_000),
@@ -232,16 +215,7 @@ async function fetchCurve(): Promise<AprEntry[]> {
     const livePools = allPools.filter(p => Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0) > 100)
     if (livePools.length === 0) return []
 
-    // Check if DeFiLlama has Monad volume data for Curve
-    const llamaMonadVolume: Record<string, number> = {}
-    const chainBreakdown = llamaDex?.chainBreakdown ?? {}
-    const monadData = chainBreakdown?.Monad ?? chainBreakdown?.monad ?? null
-    // DeFiLlama doesn't break down by pool address at this level, so it gives total chain volume
-    // We'll use it as a signal but not pool-level data
-
     const currentBlock = Number(BigInt(bnRes?.result ?? '0x0'))
-    // Step 2: virtualPrice delta APR — confirmed working on Monad
-    // Note: eth_getLogs is limited to 100 blocks on Monad RPC — unusable for 24h volume
     // virtualPrice grows as trading fees accumulate → reliable APR proxy
     const block24h = '0x' + Math.max(0, currentBlock - BLOCKS_24H).toString(16)
     const vpCalls: any[] = []
@@ -249,13 +223,12 @@ async function fetchCurve(): Promise<AprEntry[]> {
       vpCalls.push({ jsonrpc: '2.0', id: i * 2,     method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, 'latest']  })
       vpCalls.push({ jsonrpc: '2.0', id: i * 2 + 1, method: 'eth_call', params: [{ to: p.address, data: '0xbb7b8b80' }, block24h] })
     })
-    const vpRes = await fetch(RPC, {
+    const vpRes = await fetch(MONAD_RPC, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(vpCalls),
       signal: AbortSignal.timeout(12_000),
     }).then(r => r.json()).then(d => Array.isArray(d) ? d : [d]).catch(() => [])
 
-    // Step 3: Build APR entries
     const entries: AprEntry[] = []
     livePools.forEach((p, i) => {
       const tvl = Number(p.usdTotalExcludingBasePool ?? p.usdTotal ?? 0)
@@ -287,7 +260,6 @@ async function fetchCurve(): Promise<AprEntry[]> {
 }
 
 // ─── UPSHIFT — AUSD vault ─────────────────────────────────────────────────────
-// Try their API for APR; vault is AUSD so isStable=true
 async function fetchUpshift(): Promise<AprEntry[]> {
   try {
     const res = await fetch('https://app.upshift.finance/api/vaults?chainId=143', {
@@ -307,14 +279,7 @@ async function fetchUpshift(): Promise<AprEntry[]> {
           apr, type: 'vault' as const, isStable: isStable(sym),
         }
       })
-  } catch {
-    // Fallback: earnAUSD vault with estimated APR
-    return [{
-      protocol: 'Upshift', logo: '🔺', url: 'https://app.upshift.finance',
-      tokens: ['AUSD'], label: 'earnAUSD',
-      apr: 0, type: 'vault', isStable: true,
-    }]
-  }
+  } catch { return [] }
 }
 
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
@@ -364,6 +329,7 @@ async function fetchKuru(): Promise<AprEntry[]> {
 }
 
 // ─── MIDAS — tokenized RWAs (known fixed APRs) ────────────────────────────────
+// Last verified: 2025-05 — update if rates change on midas.app
 function getMidas(): AprEntry[] {
   return [
     {
@@ -379,71 +345,56 @@ function getMidas(): AprEntry[] {
   ]
 }
 
-// ─── KINTSU, MAGMA, shMONAD — LST staking vaults ─────────────────────────────
-// Try on-chain apr via exchangeRate delta if API not available
+// ─── KINTSU, MAGMA, shMONAD — LST staking vaults (parallel) ─────────────────
 async function fetchLSTVaults(): Promise<AprEntry[]> {
+  const [kintsuR, magmaR, shmonadR] = await Promise.allSettled([
+    fetch('https://api.kintsu.xyz/v1/apr?chainId=143', {
+      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+    }).then(r => r.ok ? r.json() : null),
+    fetch('https://api.magmastaking.xyz/v1/stats?chainId=143', {
+      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+    }).then(r => r.ok ? r.json() : null),
+    fetch('https://api.shmonad.xyz/v1/apr', {
+      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+    }).then(r => r.ok ? r.json() : null),
+  ])
+
   const entries: AprEntry[] = []
 
-  // Kintsu sMON
-  try {
-    const res = await fetch('https://api.kintsu.xyz/v1/apr?chainId=143', {
-      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+  const kData = kintsuR.status === 'fulfilled' ? kintsuR.value : null
+  if (kData) {
+    const apr = Number(kData?.apr ?? kData?.stakingApr ?? 0) * (kData?.apr < 2 ? 100 : 1)
+    if (apr > 0) entries.push({
+      protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
+      tokens: ['sMON'], label: 'Staked MON',
+      apr, type: 'vault', isStable: false,
     })
-    if (res.ok) {
-      const data = await res.json()
-      const apr = Number(data?.apr ?? data?.stakingApr ?? 0) * (data?.apr < 2 ? 100 : 1)
-      if (apr > 0) entries.push({
-        protocol: 'Kintsu', logo: '🔵', url: 'https://kintsu.xyz',
-        tokens: ['sMON'], label: 'Staked MON',
-        apr, type: 'vault', isStable: false,
-      })
-    }
-  } catch { /* skip */ }
+  }
 
-  // Magma gMON
-  try {
-    const res = await fetch('https://api.magmastaking.xyz/v1/stats?chainId=143', {
-      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+  const mData = magmaR.status === 'fulfilled' ? magmaR.value : null
+  if (mData) {
+    const apr = Number(mData?.apr ?? mData?.stakingApr ?? 0) * (mData?.apr < 2 ? 100 : 1)
+    if (apr > 0) entries.push({
+      protocol: 'Magma', logo: '🐲', url: 'https://magmastaking.xyz',
+      tokens: ['gMON'], label: 'MEV-Optimized Staked MON',
+      apr, type: 'vault', isStable: false,
     })
-    if (res.ok) {
-      const data = await res.json()
-      const apr = Number(data?.apr ?? data?.stakingApr ?? 0) * (data?.apr < 2 ? 100 : 1)
-      if (apr > 0) entries.push({
-        protocol: 'Magma', logo: '🐲', url: 'https://magmastaking.xyz',
-        tokens: ['gMON'], label: 'MEV-Optimized Staked MON',
-        apr, type: 'vault', isStable: false,
-      })
-    }
-  } catch { /* skip */ }
+  }
 
-  // shMonad
-  try {
-    const res = await fetch('https://api.shmonad.xyz/v1/apr', {
-      signal: AbortSignal.timeout(6_000), cache: 'no-store',
+  const sData = shmonadR.status === 'fulfilled' ? shmonadR.value : null
+  if (sData) {
+    const apr = Number(sData?.apr ?? sData?.stakingApr ?? 0) * (sData?.apr < 2 ? 100 : 1)
+    if (apr > 0) entries.push({
+      protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
+      tokens: ['shMON'], label: 'Holistic Staked MON',
+      apr, type: 'vault', isStable: false,
     })
-    if (res.ok) {
-      const data = await res.json()
-      const apr = Number(data?.apr ?? data?.stakingApr ?? 0) * (data?.apr < 2 ? 100 : 1)
-      if (apr > 0) entries.push({
-        protocol: 'shMonad', logo: '⚡', url: 'https://shmonad.xyz',
-        tokens: ['shMON'], label: 'Holistic Staked MON',
-        apr, type: 'vault', isStable: false,
-      })
-    }
-  } catch { /* skip */ }
+  }
 
   return entries
 }
 
-// ─── RENZO — ezETH restaking ──────────────────────────────────────────────────
-async function fetchRenzo(): Promise<AprEntry[]> {
-  // Renzo not yet deployed on Monad mainnet
-  return []
-}
-
-// ─── UNISWAP V3 + V4 — top pools via Uniswap GraphQL ─────────────────────────
-// V3Pool uses `address`, V4Pool uses `poolId` (no `address` field)
-// V4 feeTiers are smaller (9, 50, 100, 500) vs V3 (500, 3000, 10000)
+// ─── UNISWAP V3 + V4 — single GraphQL request for both ──────────────────────
 function parseUniPools(pools: any[], version: string): AprEntry[] {
   const out: AprEntry[] = []
   for (const p of pools) {
@@ -451,7 +402,6 @@ function parseUniPools(pools: any[], version: string): AprEntry[] {
     const vol24h = Number(p.cumulativeVolume?.value ?? 0)
     const fee    = Number(p.feeTier ?? 0)
     if (tvl < 100 || vol24h < 1) continue
-    // feeTier is in millionths (3000 = 0.3% = 3000/1_000_000)
     const apr = (vol24h * (fee / 1_000_000)) / tvl * 365 * 100
     if (apr < 0.01) continue
     const t0 = p.token0?.symbol ?? '?'
@@ -470,7 +420,7 @@ function parseUniPools(pools: any[], version: string): AprEntry[] {
   return out
 }
 
-async function fetchUniswapV3(): Promise<AprEntry[]> {
+async function fetchUniswap(): Promise<AprEntry[]> {
   try {
     const res = await fetch('https://interface.gateway.uniswap.org/v1/graphql', {
       method: 'POST',
@@ -483,20 +433,6 @@ async function fetchUniswapV3(): Promise<AprEntry[]> {
           totalLiquidity { value }
           cumulativeVolume(duration: DAY) { value }
         }
-      }` }),
-      signal: AbortSignal.timeout(15_000), cache: 'no-store',
-    })
-    const data = await res.json()
-    return parseUniPools(data?.data?.topV3Pools ?? [], 'V3')
-  } catch { return [] }
-}
-
-async function fetchUniswapV4(): Promise<AprEntry[]> {
-  try {
-    const res = await fetch('https://interface.gateway.uniswap.org/v1/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.uniswap.org' },
-      body: JSON.stringify({ query: `{
         topV4Pools(chain: MONAD, first: 100) {
           poolId feeTier
           token0 { symbol }
@@ -508,7 +444,10 @@ async function fetchUniswapV4(): Promise<AprEntry[]> {
       signal: AbortSignal.timeout(15_000), cache: 'no-store',
     })
     const data = await res.json()
-    return parseUniPools(data?.data?.topV4Pools ?? [], 'V4')
+    return [
+      ...parseUniPools(data?.data?.topV3Pools ?? [], 'V3'),
+      ...parseUniPools(data?.data?.topV4Pools ?? [], 'V4'),
+    ]
   } catch { return [] }
 }
 
@@ -516,7 +455,6 @@ async function fetchUniswapV4(): Promise<AprEntry[]> {
 async function fetchMerklRewardMap(): Promise<Map<string, number>> {
   const map = new Map<string, number>()
   try {
-    // Merkl returns LIVE reward campaigns on Monad (farming incentives)
     const res = await fetch(
       'https://api.merkl.xyz/v4/opportunities?chainId=143&action=POOL&status=LIVE&items=100',
       { signal: AbortSignal.timeout(12_000), cache: 'no-store' },
@@ -527,7 +465,6 @@ async function fetchMerklRewardMap(): Promise<Map<string, number>> {
       const addr = (o.identifier ?? '').toLowerCase()
       const apr  = Number(o.apr ?? 0)
       if (addr && apr > 0) {
-        // Accumulate in case multiple campaigns for same pool
         map.set(addr, (map.get(addr) ?? 0) + apr)
       }
     }
@@ -538,7 +475,6 @@ async function fetchMerklRewardMap(): Promise<Map<string, number>> {
 // ─── PANCAKESWAP V3 — pools via explorer API + Merkl rewards ─────────────────
 async function fetchPancakeswap(): Promise<AprEntry[]> {
   try {
-    // Fetch fee APR and Merkl reward APR in parallel
     const [poolsRes, merklMap] = await Promise.all([
       fetch(
         'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
@@ -552,7 +488,7 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
     const out: AprEntry[] = []
     for (const p of rows) {
       const tvl    = Number(p.tvlUSD ?? 0)
-      const feeApr = Number(p.apr24h ?? 0) * 100  // decimal → percentage
+      const feeApr = Number(p.apr24h ?? 0) * 100
       if (tvl < 100) continue
       const poolAddr = (p.id ?? '').toLowerCase()
       const rewardApr = merklMap.get(poolAddr) ?? 0
@@ -575,15 +511,9 @@ async function fetchPancakeswap(): Promise<AprEntry[]> {
   } catch { return [] }
 }
 
-// ─── GEARBOX — credit account pools ──────────────────────────────────────────
-async function fetchGearbox(): Promise<AprEntry[]> {
-  // Gearbox not yet deployed on Monad mainnet
-  return []
-}
-
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
-export async function GET() {
-  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, renzoR, gearboxR, uniV3R, uniV4R, pancakeR] =
+// ─── Fetch all data (used by cache) ──────────────────────────────────────────
+async function fetchAllData() {
+  const [morphoR, neverlandR, eulerR, curveR, upshiftR, lagoonR, kuruR, lstR, uniR, pancakeR] =
     await Promise.allSettled([
       fetchMorpho(),
       fetchNeverland(),
@@ -593,10 +523,7 @@ export async function GET() {
       fetchLagoon(),
       fetchKuru(),
       fetchLSTVaults(),
-      fetchRenzo(),
-      fetchGearbox(),
-      fetchUniswapV3(),
-      fetchUniswapV4(),
+      fetchUniswap(),
       fetchPancakeswap(),
     ])
 
@@ -613,32 +540,65 @@ export async function GET() {
     ...unwrap(lagoonR),
     ...unwrap(kuruR),
     ...unwrap(lstR),
-    ...unwrap(renzoR),
-    ...unwrap(gearboxR),
-    ...unwrap(uniV3R),
-    ...unwrap(uniV4R),
+    ...unwrap(uniR),
     ...unwrap(pancakeR),
     ...getMidas(),
   ].filter(e => e.apr > 0)
 
   const byApr = (a: AprEntry, b: AprEntry) => b.apr - a.apr
 
-  // Stablecoin APRs: lend, pool or vault where all tokens are stablecoins
-  const stableAPRs = all
-    .filter(e => e.isStable)
-    .sort(byApr)
-    .slice(0, 5)
-
+  const stableAPRs = all.filter(e => e.isStable).sort(byApr).slice(0, 5)
   const pools  = all.filter(e => e.type === 'pool').sort(byApr).slice(0, 10)
   const vaults = all.filter(e => e.type === 'vault').sort(byApr).slice(0, 10)
   const lends  = all.filter(e => e.type === 'lend').sort(byApr).slice(0, 10)
 
-  return NextResponse.json({
+  return {
     stableAPRs,
     pools,
     vaults,
     lends,
     lastUpdated: Date.now(),
     totalEntries: all.length,
-  })
+  }
+}
+
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
+export async function GET() {
+  const now = Date.now()
+
+  // Return cached data if fresh
+  if (serverCache && !serverCache.promise && now - serverCache.fetchedAt < CACHE_TTL) {
+    return NextResponse.json(serverCache.data)
+  }
+
+  // Deduplicate in-flight requests — reuse if another request is already fetching
+  if (serverCache?.promise) {
+    try {
+      const data = await serverCache.promise
+      return NextResponse.json(data)
+    } catch { /* fall through to retry */ }
+  }
+
+  // Fire new fetch, store promise for dedup
+  const promise = fetchAllData()
+
+  serverCache = {
+    data:      serverCache?.data ?? null,
+    fetchedAt: serverCache?.fetchedAt ?? 0,
+    promise,
+  }
+
+  try {
+    const data = await promise
+    serverCache = { data, fetchedAt: Date.now(), promise: null }
+    return NextResponse.json(data)
+  } catch {
+    // Clear promise so next request retries
+    if (serverCache) serverCache.promise = null
+    // Return stale data if available
+    if (serverCache?.data) {
+      return NextResponse.json(serverCache.data)
+    }
+    return NextResponse.json({ error: 'Failed to fetch APR data' }, { status: 500 })
+  }
 }

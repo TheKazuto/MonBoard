@@ -155,7 +155,9 @@ export default function BestAprsPage() {
   const [data,       setData]       = useState<AprData | null>(null)
   const [loading,    setLoading]    = useState(true)
   const [lastLoaded, setLastLoaded] = useState<Date | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [countdown,  setCountdown]  = useState(REFRESH_INTERVAL_MS / 1000)
+  const lastFetchRef = useRef<number>(Date.now())
+  const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -168,27 +170,31 @@ export default function BestAprsPage() {
       }
     } catch { /* keep previous data */ } finally {
       setLoading(false)
+      lastFetchRef.current = Date.now()
     }
   }, [])
 
+  // Single interval: handles both auto-refresh and countdown display
   useEffect(() => {
     fetchData()
-    // Auto-refresh every 5 minutes
-    timerRef.current = setInterval(fetchData, REFRESH_INTERVAL_MS)
+    timerRef.current = setInterval(() => {
+      const elapsed = Date.now() - lastFetchRef.current
+      const remaining = Math.max(0, Math.ceil((REFRESH_INTERVAL_MS - elapsed) / 1000))
+      setCountdown(remaining)
+      if (remaining <= 0) {
+        lastFetchRef.current = Date.now()
+        fetchData()
+      }
+    }, 1000)
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [fetchData])
 
-  // Time until next refresh
-  const [countdown, setCountdown] = useState(REFRESH_INTERVAL_MS / 1000)
-  useEffect(() => {
-    const tick = setInterval(() => {
-      setCountdown(c => {
-        if (c <= 1) return REFRESH_INTERVAL_MS / 1000
-        return c - 1
-      })
-    }, 1000)
-    return () => clearInterval(tick)
-  }, [])
+  // Manual refresh resets the timer
+  const handleRefresh = useCallback(() => {
+    lastFetchRef.current = Date.now()
+    setCountdown(REFRESH_INTERVAL_MS / 1000)
+    fetchData()
+  }, [fetchData])
 
   const fmtCountdown = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
@@ -214,7 +220,7 @@ export default function BestAprsPage() {
           )}
         </div>
         <button
-          onClick={() => { setCountdown(REFRESH_INTERVAL_MS / 1000); fetchData() }}
+          onClick={handleRefresh}
           disabled={loading}
           className="btn-primary flex items-center gap-2 text-sm py-2 px-4 disabled:opacity-60 shrink-0"
         >
