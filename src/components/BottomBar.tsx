@@ -100,6 +100,19 @@ export default function BottomBar() {
           <div className="status-dot ml-0.5" title={lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : 'Live'} />
         </div>
 
+        {/* Powered by */}
+        <div className="hidden sm:flex items-center gap-1 text-xs text-gray-400">
+          <span>Powered by</span>
+          <a
+            href="https://www.shinkalabs.tech/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-semibold text-violet-500 hover:text-violet-700 transition-colors"
+          >
+            Shinka Labs
+          </a>
+        </div>
+
         {/* Social Links */}
         <div className="flex items-center gap-0.5">
           {SocialLinks.map((link) => (
