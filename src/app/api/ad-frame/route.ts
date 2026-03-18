@@ -26,8 +26,8 @@ const AD_HTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <script async="async" data-cfasync="false" src="https://pl28909561.effectivegatecpm.com/ff4f26cf6832320f8139de3639dc511c/invoke.js"></script>
-  <div id="container-ff4f26cf6832320f8139de3639dc511c"></div>
+  <script async="async" data-cfasync="false" src="https://pl28939344.effectivegatecpm.com/a6b998a940073f5ecde2f2da82a777cc/invoke.js"></script>
+  <div id="container-a6b998a940073f5ecde2f2da82a777cc"></div>
 </body>
 </html>`
 
