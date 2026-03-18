@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": ".open-next/worker.js",
+  "name": "monboardbeta",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "monboardbeta"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "PRICE_KV",
+      "id": "678c20e54c484254ae783c21f98b3f2b",
+      "preview_id": "97ce1b9d2f0d45ef81ce9b83a9ef0938"
+    }
+  ]
+}
