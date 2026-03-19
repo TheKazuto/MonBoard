@@ -42,7 +42,7 @@ export default function AdBanner({ className = '' }: { className?: string }) {
 
       {/* Placeholder estático — substituir pelo banner do parceiro */}
       <a
-        href="https://forms.gle/2tqw8FWy1JD2Rd4s6"
+        href="https://docs.google.com/forms/d/e/1FAIpQLSc4HmUzes30tavHHsK_4SHa9V3ksPIrXXkwQcjx1Cn9eZZhgQ/viewform"
         target="_blank"
         rel="noopener noreferrer"
         style={{
