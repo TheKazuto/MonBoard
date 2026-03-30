@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { rpcBatch, getMonPrice } from '@/lib/monad'
+import { rpcBatch, ethCall, getMonPrice } from '@/lib/monad'
 import { getAprEntries } from '@/lib/aprCache'
+import { getAllPrices } from '@/lib/priceCache'
 
 export const revalidate = 0
 
 // ─── RPC helpers ─────────────────────────────────────────────────────────────
-function ethCall(to: string, data: string, id: number) {
-  return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
-}
+// Fix #1: ethCall imported from @/lib/monad — local definition removed
 function decodeUint(hex: string): bigint {
   if (!hex || hex === '0x') return 0n
   try { return BigInt(hex.startsWith('0x') ? hex : '0x' + hex) } catch { return 0n }
@@ -389,7 +388,7 @@ async function resolveTokens(addresses: string[]): Promise<Record<string, TokenI
       const decRaw   = results.find((r: any) => r.id === i * 2 + 1)?.result ?? ''
       const symbol   = decodeAbiString(symRaw) || addr.slice(2, 8).toUpperCase()
       const decimals = decRaw && decRaw !== '0x' ? Number(BigInt(decRaw)) : 18
-      TOKEN_CACHE[addr] = { symbol, decimals }
+      if (Object.keys(TOKEN_CACHE).length < 200) TOKEN_CACHE[addr] = { symbol, decimals }
     })
   }
   const out: Record<string, TokenInfo> = {}
@@ -407,7 +406,6 @@ async function getTokenPricesUSD(symbols: string[]): Promise<Record<string, numb
   const needed = symbols.filter(s => !stables[s])
   if (!needed.length) return stables
   try {
-    const { getAllPrices } = await import('@/lib/priceCache')
     const { prices } = await getAllPrices()
     const out: Record<string, number> = { ...stables }
     for (const sym of needed) { const id = SYMBOL_TO_COINGECKO[sym]; if (id && prices[id]) out[sym] = prices[id] }

@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { rpcBatch } from '@/lib/monad'
+import { rpcBatch, ethCall } from '@/lib/monad'
 
 export const revalidate = 0
 
-function ethCall(to: string, data: string, id: number) {
-  return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
-}
+// Fix #1: ethCall imported from @/lib/monad — local definition removed
 function decodeUint(hex: string): bigint {
   if (!hex || hex === '0x') return 0n
   try { return BigInt(hex.startsWith('0x') ? hex : '0x' + hex) } catch { return 0n }

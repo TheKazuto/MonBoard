@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 // Fix #4: MONAD_RPC imported from shared lib — removes local duplicate declaration
 // Fix #7: getMonPrice imported as getSharedMonPrice — removes local fetchMonPrice function
-import { rpcBatch, MONAD_RPC, getMonPrice as getSharedMonPrice } from '@/lib/monad'
+import { rpcBatch, MONAD_RPC, ethCall, getMonPrice as getSharedMonPrice } from '@/lib/monad'
 import { setAprCache } from '@/lib/aprCache'
 
 export const revalidate = 0
@@ -21,10 +21,26 @@ function isStable(sym: string): boolean { return STABLECOINS.has(sym) }
 function allStable(tokens: string[]): boolean { return tokens.length > 0 && tokens.every(isStable) }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// Fix #1: ethCall imported from @/lib/monad — local definition removed
 // Fix #4: MONAD_RPC no longer declared here — imported from @/lib/monad above
 
-function ethCall(to: string, data: string, id: number) {
-  return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
+// Fix #7 (ALTO): Semáforo HTTP — limita subrequests simultâneas a 4.
+// Cloudflare Workers permite no máximo 6 subrequests; sem semáforo a fase 2
+// (12 fetchers em paralelo) dispara dezenas de conexões simultâneas.
+function makeSemaphore(max: number) {
+  let active = 0
+  const queue: Array<() => void> = []
+  const acquire = (): Promise<void> => {
+    if (active < max) { active++; return Promise.resolve() }
+    return new Promise(resolve => queue.push(() => { active++; resolve() }))
+  }
+  const release = (): void => { active--; const next = queue.shift(); if (next) next() }
+  return { acquire, release }
+}
+const httpSem = makeSemaphore(4)
+async function fetchThrottled(url: string, init?: RequestInit): Promise<Response> {
+  await httpSem.acquire()
+  try { return await fetch(url, init) } finally { httpSem.release() }
 }
 
 // Convert RAY (1e27) to percentage APR
@@ -82,7 +98,7 @@ async function fetchMorpho(): Promise<AprEntry[]> {
     }
   }`
   try {
-    const res = await fetch('https://api.morpho.org/graphql', {
+    const res = await fetchThrottled('https://api.morpho.org/graphql', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -191,7 +207,7 @@ async function fetchNeverland(monPrice: number): Promise<AprEntry[]> {
 // ─── EULER V2 — vaults (supply APR) ──────────────────────────────────────────
 async function fetchEulerV2(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
+    const res = await fetchThrottled(
       'https://indexer-prod.euler.finance/v2/vault/list?chainId=143&take=100',
       { signal: AbortSignal.timeout(10_000), cache: 'no-store' }
     )
@@ -292,7 +308,7 @@ function upshiftTokenFromName(name: string): string {
 
 async function fetchUpshiftRaw(): Promise<any[]> {
   try {
-    const res = await fetch(UPSHIFT_API_URL, {
+    const res = await fetchThrottled(UPSHIFT_API_URL, {
       signal: AbortSignal.timeout(10_000),
       cache: 'no-store',
       headers: {
@@ -356,7 +372,7 @@ function parseUpshift(vaults: any[]): AprEntry[] {
 // ─── LAGOON — vaults ──────────────────────────────────────────────────────────
 async function fetchLagoon(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
+    const res = await fetchThrottled(
       'https://app.lagoon.finance/api/vaults?chainId=143&underlyingassetSymbol=0&curatorId=0&pageIndex=0&pageSize=50&includeApr=true',
       { signal: AbortSignal.timeout(8_000), cache: 'no-store' }
     )
@@ -444,7 +460,7 @@ const GEARBOX_POOL_LIST = [
 async function fetchGearboxExtraApy(): Promise<Map<string, number>> {
   const map = new Map<string, number>()
   try {
-    const res = await fetch(GEARBOX_APY_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
+    const res = await fetchThrottled(GEARBOX_APY_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' })
     if (!res.ok) return map
     const data = await res.json()
     const pools: any[] = data?.chains?.['143']?.pools?.data ?? []
@@ -465,7 +481,7 @@ async function fetchGearboxExtraApy(): Promise<Map<string, number>> {
 async function fetchGearbox(): Promise<AprEntry[]> {
   try {
     const [poolsRes, extraApyMap] = await Promise.all([
-      fetch(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
+      fetchThrottled(GEARBOX_STATIC_URL, { signal: AbortSignal.timeout(8_000), cache: 'no-store' }),
       fetchGearboxExtraApy(),
     ])
     if (!poolsRes.ok) return []
@@ -511,22 +527,14 @@ async function fetchGearbox(): Promise<AprEntry[]> {
 const BLOCKS_PER_DAY = 172_800
 const CONVERT_TO_ASSETS = '0x07a2d13a' + '0000000000000000000000000000000000000000000000000de0b6b3a7640000'
 
+// Fix #5 (MÉDIO): getBlockNumber e getVaultApr agora usam rpcBatch —
+// eliminam fetch(MONAD_RPC) direto e contam como 1 subrequest ao invés de N.
 async function getBlockNumber(): Promise<number> {
-  const res = await fetch(MONAD_RPC, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
-    signal: AbortSignal.timeout(5_000),
-  }).then(r => r.json())
-  return parseInt(res?.result ?? '0x0', 16)
+  const results = await rpcBatch([{ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }])
+  return parseInt(results[0]?.result ?? '0x0', 16)
 }
 
-async function getPricePerShare(vault: string, block: string): Promise<bigint> {
-  const res = await fetch(MONAD_RPC, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: vault, data: CONVERT_TO_ASSETS }, block] }),
-    signal: AbortSignal.timeout(6_000),
-  }).then(r => r.json())
-  const hex = res?.result ?? '0x0'
+function hexToBigInt(hex: string): bigint {
   try { return hex && hex !== '0x' && hex !== '0x0' ? BigInt(hex) : 0n } catch { return 0n }
 }
 
@@ -544,14 +552,19 @@ async function getVaultApr(vault: string, currentBlock: number): Promise<number>
     { days: 1, blocks: BLOCKS_PER_DAY * 1 },
   ]
   const pastBlocks = windows.map(w => '0x' + Math.max(1, currentBlock - w.blocks).toString(16))
-  const [ppsNow, ...ppsPasts] = await Promise.all([
-    getPricePerShare(vault, 'latest'),
-    ...pastBlocks.map(b => getPricePerShare(vault, b)),
-  ])
+
+  // Batch all 4 eth_call into a single RPC request (1 subrequest)
+  const calls = [
+    { jsonrpc: '2.0', id: 0, method: 'eth_call', params: [{ to: vault, data: CONVERT_TO_ASSETS }, 'latest'] },
+    ...pastBlocks.map((b, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'eth_call', params: [{ to: vault, data: CONVERT_TO_ASSETS }, b] })),
+  ]
+  const results = await rpcBatch(calls).catch(() => [] as any[])
+
+  const ppsNow = hexToBigInt(results[0]?.result ?? '0x0')
   if (ppsNow === 0n) return 0
 
   for (let i = 0; i < windows.length; i++) {
-    const apr = ppsGrowthToApr(ppsNow, ppsPasts[i], windows[i].days)
+    const apr = ppsGrowthToApr(ppsNow, hexToBigInt(results[i + 1]?.result ?? '0x0'), windows[i].days)
     if (apr > 0) return apr
   }
   return 0
@@ -560,7 +573,7 @@ async function getVaultApr(vault: string, currentBlock: number): Promise<number>
 // ─── MAGMA — gMON APR via GraphQL ────────────────────────────────────────────
 async function fetchMagmaOnchain(): Promise<{ apr: number; tvlInMON: number } | null> {
   try {
-    const res = await fetch('https://magma-http-app.fly.dev/graphql', {
+    const res = await fetchThrottled('https://magma-http-app.fly.dev/graphql', {
       method: 'POST',
       signal: AbortSignal.timeout(8_000),
       cache: 'no-store',
@@ -590,7 +603,7 @@ async function fetchDeFiLlamaTvls(): Promise<Map<string, number>> {
   const slugs = ['shmonad', 'kintsu', 'magma-staking', 'curvance'] as const
   const results = await Promise.allSettled(
     slugs.map(slug =>
-      fetch(`https://api.llama.fi/tvl/${slug}`, { signal: AbortSignal.timeout(5_000), cache: 'no-store' })
+      fetchThrottled(`https://api.llama.fi/tvl/${slug}`, { signal: AbortSignal.timeout(5_000), cache: 'no-store' })
         .then(r => r.text())
     )
   )
@@ -607,7 +620,7 @@ async function fetchMerklAll(): Promise<any[]> {
   try {
     // Merkl limits to 100 items/page — fetch pages 1-3 in parallel
     const pages = await Promise.all([1, 2, 3].map(page =>
-      fetch(
+      fetchThrottled(
         `https://api.merkl.xyz/v4/opportunities?chainId=143&status=LIVE&items=100&page=${page}`,
         { signal: AbortSignal.timeout(12_000), cache: 'no-store', headers: { 'Accept': 'application/json' } }
       ).then(r => r.ok ? r.json() : null).catch(() => null)
@@ -622,7 +635,7 @@ async function fetchMerklAll(): Promise<any[]> {
 // ─── FLOPPY BACKUP — native APY for Monad LST/vault tokens ───────────────────
 async function fetchFloppyNativeApy(): Promise<Map<string, number>> {
   try {
-    const res = await fetch('https://api.floppy-backup.com/v1/monad/native_apy', {
+    const res = await fetchThrottled('https://api.floppy-backup.com/v1/monad/native_apy', {
       signal: AbortSignal.timeout(5_000),
       cache: 'no-store',
       headers: {
@@ -762,7 +775,7 @@ async function fetchUniswap(): Promise<AprEntry[]> {
   }`
 
   try {
-    const res = await fetch(GW, {
+    const res = await fetchThrottled(GW, {
       method: 'POST', headers,
       body: JSON.stringify({ query }),
       signal: AbortSignal.timeout(15_000), cache: 'no-store',
@@ -852,7 +865,7 @@ async function fetchCurvance(nativeApyMap: Map<string, number>, llamaTvls: Map<s
 // ─── MIDAS — tokenized RWAs ───────────────────────────────────────────────────
 async function fetchMidas(): Promise<AprEntry[]> {
   try {
-    const res = await fetch('https://api-prod.midas.app/api/marketplace/products', {
+    const res = await fetchThrottled('https://api-prod.midas.app/api/marketplace/products', {
       signal: AbortSignal.timeout(10_000),
       cache: 'no-store',
       headers: {
@@ -911,7 +924,7 @@ const KURU_HEADERS = {
 
 async function fetchKuruVaultApr(vaultAddress: string): Promise<number> {
   try {
-    const res = await fetch(
+    const res = await fetchThrottled(
       `https://api.kuru.io/api/v3/vaults/${vaultAddress}/performance`,
       { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS }
     )
@@ -936,7 +949,7 @@ async function fetchKuruVaultApr(vaultAddress: string): Promise<number> {
 
 async function fetchKuru(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
+    const res = await fetchThrottled(
       'https://api.kuru.io/api/v3/vaults',
       { signal: AbortSignal.timeout(8_000), cache: 'no-store', headers: KURU_HEADERS }
     )
@@ -978,7 +991,7 @@ async function fetchKuru(): Promise<AprEntry[]> {
 // ─── KURU — AMM pool APRs via /api/v2/vaults ─────────────────────────────────
 async function fetchKuruPools(): Promise<AprEntry[]> {
   try {
-    const res = await fetch(
+    const res = await fetchThrottled(
       'https://api.kuru.io/api/v2/vaults',
       {
         signal: AbortSignal.timeout(8_000),
@@ -1038,7 +1051,7 @@ async function fetchPancakeswap(merklData: any[]): Promise<AprEntry[]> {
   }
 
   try {
-    const poolsRes = await fetch(
+    const poolsRes = await fetchThrottled(
       'https://explorer.pancakeswap.com/api/cached/pools/list?protocols=v3&chains=monad&orderBy=tvlUSD',
       { signal: AbortSignal.timeout(15_000), cache: 'no-store' },
     )

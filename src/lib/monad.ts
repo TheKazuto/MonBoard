@@ -8,7 +8,23 @@
 
 // ─── RPC ─────────────────────────────────────────────────────────────────────
 
-export const MONAD_RPC = 'https://rpc.monad.xyz'
+export const MONAD_RPC      = 'https://rpc.monad.xyz'
+export const MONAD_CHAIN_ID = 143
+export const MONAD_EXPLORER = 'https://monadexplorer.com'
+
+export const MONAD_VIEM_CHAIN = {
+  id: MONAD_CHAIN_ID,
+  name: 'Monad',
+  nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
+  rpcUrls: { default: { http: [MONAD_RPC] } },
+  blockExplorers: { default: { name: 'MonadExplorer', url: MONAD_EXPLORER } },
+} as const
+
+// Fix #1: ethCall extracted here — was duplicated in best-aprs, defi, debug-protocols
+/** Build a JSON-RPC eth_call object for use with rpcBatch(). */
+export function ethCall(to: string, data: string, id: number) {
+  return { jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data }, 'latest'] }
+}
 
 /**
  * Send a JSON-RPC batch to the Monad node.

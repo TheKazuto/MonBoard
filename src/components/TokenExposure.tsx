@@ -1,27 +1,16 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { cachedFetch } from '@/lib/dataCache'
+// Fix #12: TokenExposure now reads from PortfolioContext instead of making an
+// independent cachedFetch('/api/token-exposure'). Both calls resolve from the
+// same 5-min client cache anyway, so this removes redundant state machinery and
+// ensures the widget always shows data consistent with the rest of the dashboard.
+
 import { useWallet } from '@/contexts/WalletContext'
+import { usePortfolio } from '@/contexts/PortfolioContext'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import { RefreshCw, Wallet } from 'lucide-react'
 import { SORA } from '@/lib/styles'
-
-interface TokenData {
-  symbol: string
-  name: string
-  balance: number
-  price: number
-  value: number
-  color: string
-  percentage: number
-}
-
-interface ApiResponse {
-  tokens: TokenData[]
-  totalValue: number
-  address: string
-}
+import type { TokenData } from '@/contexts/PortfolioContext'
 
 function formatValue(v: number) {
   if (v >= 1000) return `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
@@ -48,36 +37,12 @@ function CustomTooltip({ active, payload }: any) {
 }
 
 export default function TokenExposure() {
-  const { address, stableAddress, isConnected } = useWallet()
-  const [data, setData] = useState<ApiResponse | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(false)
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const { isConnected } = useWallet()
+  const { totals, status, lastUpdated, refresh } = usePortfolio()
 
-  async function fetchTokens(force = false) {
-    if (!stableAddress) return
-    setLoading(true)
-    setError(false)
-    try {
-      const json = await cachedFetch<ApiResponse>('/api/token-exposure', stableAddress, force)
-      if ((json as any).error) throw new Error((json as any).error)
-      setData(json)
-      setLastUpdated(new Date())
-    } catch {
-      setError(true)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (stableAddress) {
-      fetchTokens()
-    } else {
-      setData(null)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stableAddress])
+  const loading = status === 'loading' || status === 'partial'
+  const tokens  = totals.tokens
+  const totalValue = totals.tokenValueUSD
 
   // ── Not connected ────────────────────────────────────────────────────────────
   if (!isConnected) {
@@ -97,7 +62,7 @@ export default function TokenExposure() {
   }
 
   // ── Loading skeleton ─────────────────────────────────────────────────────────
-  if (loading && !data) {
+  if (tokens.length === 0 && loading) {
     return (
       <div className="card p-5">
         <h3 className="font-semibold text-gray-800 mb-4" style={SORA}>
@@ -121,7 +86,7 @@ export default function TokenExposure() {
   }
 
   // ── Error ────────────────────────────────────────────────────────────────────
-  if (error) {
+  if (status === 'error' && tokens.length === 0) {
     return (
       <div className="card p-5">
         <h3 className="font-semibold text-gray-800 mb-4" style={SORA}>
@@ -130,7 +95,7 @@ export default function TokenExposure() {
         <div className="flex flex-col items-center justify-center py-6 gap-3 text-center">
           <p className="text-sm text-red-400">Failed to load balances</p>
           <button
-            onClick={() => fetchTokens(true)}
+            onClick={refresh}
             className="text-xs text-violet-600 hover:text-violet-800 flex items-center gap-1"
           >
             <RefreshCw size={12} /> Try again
@@ -141,7 +106,7 @@ export default function TokenExposure() {
   }
 
   // ── Empty wallet ─────────────────────────────────────────────────────────────
-  if (data && data.tokens.length === 0) {
+  if (tokens.length === 0) {
     return (
       <div className="card p-5">
         <h3 className="font-semibold text-gray-800 mb-4" style={SORA}>
@@ -156,8 +121,6 @@ export default function TokenExposure() {
   }
 
   // ── Main view ────────────────────────────────────────────────────────────────
-  const tokens = data?.tokens ?? []
-
   return (
     <div className="card p-5">
       <div className="flex items-center justify-between mb-4">
@@ -165,14 +128,12 @@ export default function TokenExposure() {
           <h3 className="font-semibold text-gray-800" style={SORA}>
             Token Exposure
           </h3>
-          {data && (
-            <p className="text-xs text-gray-400 mt-0.5">
-              Total: <span className="font-medium text-gray-600">{formatValue(data.totalValue)}</span>
-            </p>
-          )}
+          <p className="text-xs text-gray-400 mt-0.5">
+            Total: <span className="font-medium text-gray-600">{formatValue(totalValue)}</span>
+          </p>
         </div>
         <button
-          onClick={() => fetchTokens(true)}
+          onClick={refresh}
           disabled={loading}
           className="p-1.5 rounded-lg hover:bg-gray-50 text-gray-400 hover:text-gray-600 transition-colors disabled:opacity-40"
           title="Refresh"
@@ -196,7 +157,7 @@ export default function TokenExposure() {
                 dataKey="value"
                 strokeWidth={0}
               >
-                {tokens.map((token, i) => (
+                {tokens.map((token) => (
                   <Cell key={token.symbol} fill={token.color} />
                 ))}
               </Pie>
@@ -207,7 +168,7 @@ export default function TokenExposure() {
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
             <span className="text-xs text-gray-400">Total</span>
             <span className="text-sm font-bold text-gray-700">
-              {data ? formatValue(data.totalValue) : '—'}
+              {formatValue(totalValue)}
             </span>
           </div>
         </div>

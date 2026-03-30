@@ -168,28 +168,6 @@ interface AprData {
   totalEntries: number
 }
 
-function categorize(entries: AprEntry[]): AprData {
-  const stableAPRs: AprEntry[] = []
-  const pools:      AprEntry[] = []
-  const vaults:     AprEntry[] = []
-  const lends:      AprEntry[] = []
-
-  for (const e of entries) {
-    if (e.isStable) { stableAPRs.push(e); continue }
-    if (e.type === 'pool')       pools.push(e)
-    else if (e.type === 'vault') vaults.push(e)
-    else if (e.type === 'lend')  lends.push(e)
-  }
-
-  return {
-    stableAPRs: stableAPRs.slice(0, 10),
-    pools:      pools.slice(0, 10),
-    vaults:     vaults.slice(0, 10),
-    lends:      lends.slice(0, 10),
-    lastUpdated:  Date.now(),
-    totalEntries: entries.length,
-  }
-}
 
 export default function BestAprsPage() {
   const [data,       setData]       = useState<AprData | null>(null)
@@ -205,9 +183,7 @@ export default function BestAprsPage() {
       const res = await fetch('/api/best-aprs', { cache: 'no-store' })
       if (res.ok) {
         const json = await res.json()
-        if (Array.isArray(json)) {
-          setData(categorize(json))
-        } else if (json.pools || json.vaults || json.lends || json.stableAPRs) {
+        if (json.pools || json.vaults || json.lends || json.stableAPRs) {
           setData({
             stableAPRs:   json.stableAPRs   ?? [],
             pools:        json.pools         ?? [],

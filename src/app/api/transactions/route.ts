@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { MONAD_RPC as RPC } from '@/lib/monad'
+import { MONAD_RPC as RPC, rpcBatch } from '@/lib/monad'
 
 export const revalidate = 0
 
@@ -116,12 +116,19 @@ export async function GET(req: NextRequest) {
       ...nativeTxsRes.map((t: any) => t.blockNumber),
     ])] as string[]
 
-    // Resolve timestamps in parallel (max 30 blocks)
+    // Resolve timestamps in a single batch (max 30 blocks)
     const blockTimestamps: Record<string, number> = {}
-    await Promise.all(blockNums.slice(0, 30).map(async (bn) => {
-      const block = await rpc('eth_getBlockByNumber', [bn, false])
-      if (block) blockTimestamps[bn] = parseInt(block.timestamp, 16)
-    }))
+    const batchBlocks = blockNums.slice(0, 30)
+    if (batchBlocks.length > 0) {
+      const batchCalls = batchBlocks.map((bn, i) => ({
+        jsonrpc: '2.0', method: 'eth_getBlockByNumber', params: [bn, false], id: i,
+      }))
+      const batchResults = await rpcBatch(batchCalls).catch(() => [] as any[])
+      for (let i = 0; i < batchBlocks.length; i++) {
+        const block = batchResults.find((r: any) => r.id === i)?.result
+        if (block) blockTimestamps[batchBlocks[i]] = parseInt(block.timestamp, 16)
+      }
+    }
 
     // Build ERC-20 txs
     const erc20Txs = allLogs.map((log: any) => ({
@@ -175,36 +182,31 @@ async function fetchNativeTxs(addrLower: string, fromBlockHex: string, latestBlo
     }
 
     const results: any[] = []
-    await Promise.all(blockNums.map(async (bn) => {
-      try {
-        const block = await fetch(RPC, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_getBlockByNumber', params: ['0x' + bn.toString(16), true], id: bn }),
-          cache: 'no-store',
-        }).then(r => r.json())
-
-        const txs: any[] = block?.result?.transactions ?? []
-        for (const tx of txs) {
-          if (
-            tx.value && tx.value !== '0x0' &&
-            (tx.from?.toLowerCase() === addrLower || tx.to?.toLowerCase() === addrLower)
-          ) {
-            // Fix #4 (ALTO): Whitelist only the fields we need instead of spreading
-            // the entire RPC tx object (...tx). A malicious or compromised RPC node
-            // could inject unexpected fields that reach the client response.
-            results.push({
-              hash:        String(tx.hash        ?? ''),
-              from:        String(tx.from        ?? ''),
-              to:          String(tx.to          ?? ''),
-              value:       String(tx.value       ?? '0x0'),
-              input:       tx.input === '0x' ? '0x' : tx.input,
-              blockNumber: String(block.result.number ?? ''),
-            })
-          }
-        }
-      } catch { /* skip block */ }
+    // Batch all block fetches into a single RPC call (respects Cloudflare 6-subrequest limit)
+    const batchCalls = blockNums.map((bn, i) => ({
+      jsonrpc: '2.0', method: 'eth_getBlockByNumber', params: ['0x' + bn.toString(16), true], id: i,
     }))
+    const blockResponses = await rpcBatch(batchCalls).catch(() => [] as any[])
+    for (const resp of blockResponses) {
+      const block = resp?.result
+      if (!block) continue
+      const txs: any[] = block.transactions ?? []
+      for (const tx of txs) {
+        if (
+          tx.value && tx.value !== '0x0' &&
+          (tx.from?.toLowerCase() === addrLower || tx.to?.toLowerCase() === addrLower)
+        ) {
+          results.push({
+            hash:        String(tx.hash   ?? ''),
+            from:        String(tx.from   ?? ''),
+            to:          String(tx.to     ?? ''),
+            value:       String(tx.value  ?? '0x0'),
+            input:       tx.input === '0x' ? '0x' : tx.input,
+            blockNumber: String(block.number ?? ''),
+          })
+        }
+      }
+    }
 
     return results
   } catch {

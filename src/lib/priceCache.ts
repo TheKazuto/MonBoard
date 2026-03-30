@@ -95,11 +95,18 @@ async function writeToKV(kv: KVStore, data: PriceData): Promise<void> {
   }
 }
 
-// ─── Fetch CoinGecko ──────────────────────────────────────────────────────────
-async function fetchFromCoinGecko(): Promise<PriceData> {
+// ─── CoinGecko headers ───────────────────────────────────────────────────────
+// Fix #11: extracted here so top-tokens/route.ts can import instead of duplicating
+export function buildCoinGeckoHeaders(): Record<string, string> {
   const apiKey  = process.env.COINGECKO_API_KEY
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (apiKey) headers['x-cg-demo-api-key'] = apiKey
+  return headers
+}
+
+// ─── Fetch CoinGecko ──────────────────────────────────────────────────────────
+async function fetchFromCoinGecko(): Promise<PriceData> {
+  const headers = buildCoinGeckoHeaders()
 
   const ids = ALL_COIN_IDS.join(',')
   const res = await fetch(

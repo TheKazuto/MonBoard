@@ -300,7 +300,7 @@ export default function PortfolioPage() {
                 )}
               </div>
               {address && (
-                <a href={`https://monadscan.com/address/${address}`} target="_blank" rel="noopener noreferrer"
+                <a href={`https://monadexplorer.com/address/${address}`} target="_blank" rel="noopener noreferrer"
                   className="text-xs text-violet-500 hover:text-violet-700 transition-colors">
                   View on explorer →
                 </a>

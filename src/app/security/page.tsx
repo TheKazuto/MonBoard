@@ -10,6 +10,7 @@ import { useWallet } from '@/contexts/WalletContext'
 import { useChainId, useSwitchChain, useSendTransaction } from 'wagmi'
 import { createPublicClient, http, formatUnits, encodeFunctionData } from 'viem'
 import { SORA } from '@/lib/styles'
+import { MONAD_RPC, MONAD_CHAIN_ID, MONAD_EXPLORER, MONAD_VIEM_CHAIN } from '@/lib/monad'
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 interface Approval {
@@ -26,18 +27,6 @@ interface Approval {
   blockNumber:  bigint
 }
 
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const MONAD_CHAIN_ID = 143
-const MONAD_EXPLORER = 'https://monadexplorer.com'
-const MONAD_RPC      = 'https://rpc.monad.xyz'
-
-const MONAD_VIEM_CHAIN = {
-  id: MONAD_CHAIN_ID,
-  name: 'Monad',
-  nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
-  rpcUrls: { default: { http: [MONAD_RPC] } },
-  blockExplorers: { default: { name: 'MonadExplorer', url: MONAD_EXPLORER } },
-} as const
 
 const TOPIC_ERC20_APPROVAL   = '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925' as `0x${string}`
 const TOPIC_NFT_APPROVAL_ALL = '0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31' as `0x${string}`

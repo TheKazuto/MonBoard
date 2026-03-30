@@ -24,10 +24,7 @@ const FILTERS = ['All', 'Receive', 'Send', 'Swap', 'DeFi', 'NFT', 'Contract'] as
 type Filter = typeof FILTERS[number]
 const PAGE_SIZE = 20
 
-const watchedWallets = [
-  { address: '0x1234...5678', label: 'Whale Watch', txCount: 142, lastTx: '5m ago' },
-  { address: '0xabcd...ef01', label: 'Monad Team', txCount: 8, lastTx: '2h ago' },
-]
+const watchedWallets: Array<{ address: string; label: string; txCount: number; lastTx: string }> = []
 
 // ─── Row ──────────────────────────────────────────────────────────────────────
 function TxRow({ tx }: { tx: Transaction }) {
@@ -36,7 +33,7 @@ function TxRow({ tx }: { tx: Transaction }) {
 
   return (
     <a
-      href={`https://monadscan.com/tx/${tx.hash}`}
+      href={`https://monadexplorer.com/tx/${tx.hash}`}
       target="_blank"
       rel="noopener noreferrer"
       className="flex items-center gap-3 px-4 py-3.5 hover:bg-violet-50/60 transition-all group border-b border-gray-50 last:border-0"
@@ -143,7 +140,7 @@ export default function TransactionsPage() {
     [filtered, safePage]
   )
 
-  const monadScanUrl = `https://monadscan.com/address/${address}`
+  const monadScanUrl = `https://monadexplorer.com/address/${address}`
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-5">

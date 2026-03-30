@@ -20,7 +20,7 @@ function TxRow({ tx }: { tx: Transaction }) {
 
   return (
     <a
-      href={`https://monadscan.com/tx/${tx.hash}`}
+      href={`https://monadexplorer.com/tx/${tx.hash}`}
       target="_blank"
       rel="noopener noreferrer"
       className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-violet-50/60 transition-all group -mx-1"
