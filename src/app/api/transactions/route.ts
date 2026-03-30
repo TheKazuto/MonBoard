@@ -9,6 +9,7 @@ async function rpc(method: string, params: any[], id = 1) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', method, params, id }),
     cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
   })
   const d = await r.json()
   return d.result
@@ -43,8 +44,8 @@ export async function GET(req: NextRequest) {
         return u.toString()
       }
       const [txRes, tokenRes] = await Promise.all([
-        fetch(buildEtherscanUrl('account', 'txlist'),  { cache: 'no-store' }),
-        fetch(buildEtherscanUrl('account', 'tokentx'), { cache: 'no-store' }),
+        fetch(buildEtherscanUrl('account', 'txlist'),  { cache: 'no-store', signal: AbortSignal.timeout(15_000) }),
+        fetch(buildEtherscanUrl('account', 'tokentx'), { cache: 'no-store', signal: AbortSignal.timeout(15_000) }),
       ])
       const [txData, tokenData] = await Promise.all([txRes.json(), tokenRes.json()])
 

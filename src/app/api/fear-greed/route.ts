@@ -10,23 +10,25 @@ export async function GET() {
     const data = await cached('fear-greed', async () => {
       const res = await fetch(
         'https://api.alternative.me/fng/?limit=30&format=json',
-        { cache: 'no-store' }
+        { cache: 'no-store', signal: AbortSignal.timeout(8_000) }
       )
       if (!res.ok) throw new Error('Alternative.me error')
       const json = await res.json()
-      const d = json.data
-      if (!d || d.length === 0) throw new Error('empty data')
+      const d: any[] = json?.data
+      if (!Array.isArray(d) || d.length === 0) throw new Error('empty data')
 
-      const now      = d[0]
-      const yesterday = d[1] ?? d[0]
-      const weekAgo  = d[6] ?? d[0]
-      const monthAgo = d[29] ?? d[0]
+      function parseEntry(entry: any): { value: number; label: string } {
+        const value = parseInt(entry?.value, 10)
+        const label = typeof entry?.value_classification === 'string' ? entry.value_classification : ''
+        if (isNaN(value) || value < 0 || value > 100) throw new Error('invalid fear-greed value')
+        return { value, label }
+      }
 
       return {
-        now:       { value: parseInt(now.value),       label: now.value_classification },
-        yesterday: { value: parseInt(yesterday.value), label: yesterday.value_classification },
-        weekAgo:   { value: parseInt(weekAgo.value),   label: weekAgo.value_classification },
-        monthAgo:  { value: parseInt(monthAgo.value),  label: monthAgo.value_classification },
+        now:       parseEntry(d[0]),
+        yesterday: parseEntry(d[1] ?? d[0]),
+        weekAgo:   parseEntry(d[6] ?? d[0]),
+        monthAgo:  parseEntry(d[29] ?? d[0]),
       }
     }, CACHE_TTL)
 

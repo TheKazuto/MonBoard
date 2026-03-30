@@ -115,8 +115,8 @@ async function fetchFromCoinGecko(): Promise<PriceData> {
 
   for (const coin of coins) {
     if (!coin.id) continue
-    prices[coin.id]    = coin.current_price                ?? 0
-    change24h[coin.id] = coin.price_change_percentage_24h  ?? 0
+    prices[coin.id]    = Math.max(0, coin.current_price               ?? 0)
+    change24h[coin.id] = coin.price_change_percentage_24h ?? 0
     if (coin.image) images[coin.id] = coin.image
   }
 

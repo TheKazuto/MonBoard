@@ -25,7 +25,9 @@ const SEED  = [
 
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address') ?? ''
-  if (!address) return NextResponse.json({ error: 'Pass ?address=0x...' })
+  if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    return NextResponse.json({ error: 'Invalid address. Expected 0x + 40 hex chars.' }, { status: 400 })
+  }
   const userPadded = address.slice(2).toLowerCase().padStart(64, '0')
   const trace: any = {}
 
@@ -94,8 +96,9 @@ export async function GET(req: NextRequest) {
     }
 
   } catch (e: any) {
-    trace.error = e?.message ?? String(e)
-    trace.stack = (e?.stack ?? '').slice(0, 500)
+    // Never expose stack traces or raw error messages to the client
+    trace.error = 'Internal error'
+    console.error('[debug-protocols]', e?.message ?? e)
   }
 
   return NextResponse.json(trace)

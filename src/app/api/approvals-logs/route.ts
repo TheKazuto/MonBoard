@@ -25,15 +25,16 @@ function validateBlock(v: string): boolean {
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl
 
-  const chainId   = Number(searchParams.get('chainId'))
+  const chainIdRaw = searchParams.get('chainId')
+  const chainId    = chainIdRaw !== null ? Number(chainIdRaw) : NaN
   const topic0    = searchParams.get('topic0') ?? ''
   const topic1    = searchParams.get('topic1') ?? ''
   const fromBlock = searchParams.get('fromBlock') ?? '0'
   const toBlock   = searchParams.get('toBlock')   ?? 'latest'
 
-  // ── Chain validation (already existed) ────────────────────────────────────
-  if (!SUPPORTED_CHAINS.has(chainId)) {
-    return NextResponse.json({ status: '0', message: 'Unsupported chain', result: [] }, { status: 400 })
+  // ── Chain validation ───────────────────────────────────────────────────────
+  if (isNaN(chainId) || !SUPPORTED_CHAINS.has(chainId)) {
+    return NextResponse.json({ status: '0', message: 'Invalid or unsupported chainId', result: [] }, { status: 400 })
   }
 
   // ── Fix #2: Validate topic format (0x + 64 hex chars) ─────────────────────

@@ -24,18 +24,21 @@ export const monadMainnet = defineChain({
   },
 })
 
-// Fix #12 (MÉDIO): Removed the 'monboard' fallback projectId.
-// An invalid/unknown projectId causes WalletConnect to fail silently or use
-// another project's credentials. A real projectId from cloud.walletconnect.com
-// is required. If not set, we warn clearly rather than use a fake value.
 const wcProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
-if (!wcProjectId && typeof window !== 'undefined') {
-  console.warn('[MonBoard] NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is not set. WalletConnect connections will be disabled.')
+
+// Throw at module load time so the error is visible in build/runtime logs.
+// A missing or fake projectId causes WalletConnect to fail silently or
+// piggyback on another project's credentials.
+if (!wcProjectId) {
+  throw new Error(
+    '[MonBoard] NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is required. ' +
+    'Get a project ID at https://cloud.walletconnect.com and add it to your .env file.'
+  )
 }
 
 const wagmiConfig = getDefaultConfig({
   appName:   'MonBoard',
-  projectId: wcProjectId ?? 'MISSING_WALLETCONNECT_PROJECT_ID',
+  projectId: wcProjectId,
   chains:    [monadMainnet],
   ssr:       false,
 })

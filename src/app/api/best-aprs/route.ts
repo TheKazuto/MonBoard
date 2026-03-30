@@ -34,6 +34,9 @@ function rayToApr(hex: string, wordIndex: number): number {
     const words = hex.slice(2).match(/.{64}/g) ?? []
     if (!words[wordIndex]) return 0
     const rate = BigInt('0x' + words[wordIndex])
+    // Fix #14: cap at 1e20 (a RAY value above this would produce Infinity after /1e27)
+    const MAX_SAFE_RAY = BigInt('100000000000000000000000000000000000000000000000') // 1e47
+    if (rate > MAX_SAFE_RAY) return 0
     return Number(rate) / 1e27 * 100
   } catch { return 0 }
 }

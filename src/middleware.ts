@@ -1,5 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+// ─── CORS allowed origins ─────────────────────────────────────────────────────
+// API routes are called only by the MonBoard frontend.
+// Requests from any other origin are blocked at the CORS layer.
+const ALLOWED_ORIGINS = new Set([
+  'https://monboard.pro',
+  'https://www.monboard.pro',
+])
+
+function isAllowedOrigin(origin: string | null): boolean {
+  if (!origin) return true  // same-origin requests (no Origin header) are allowed
+  if (ALLOWED_ORIGINS.has(origin)) return true
+  // Allow localhost in non-production for local development
+  if (process.env.NODE_ENV !== 'production' && /^https?:\/\/localhost(:\d+)?$/.test(origin)) return true
+  return false
+}
+
 // Simple in-memory rate limiter for API routes.
 // Runs on the Edge runtime — no extra dependency needed.
 // Limits: 60 requests / minute per IP across all /api/ routes.
@@ -53,9 +69,35 @@ function getClientIp(req: NextRequest): string {
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
-  // Only rate-limit API routes
+  // Only apply to API routes
   if (!pathname.startsWith('/api/')) {
     return NextResponse.next()
+  }
+
+  const origin = req.headers.get('origin')
+
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    if (!isAllowedOrigin(origin)) {
+      return new NextResponse(null, { status: 403 })
+    }
+    return new NextResponse(null, {
+      status: 204,
+      headers: {
+        'Access-Control-Allow-Origin':  origin ?? '',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Max-Age':       '86400',
+      },
+    })
+  }
+
+  // Block cross-origin GET requests from untrusted origins
+  if (origin && !isAllowedOrigin(origin)) {
+    return new NextResponse(
+      JSON.stringify({ error: 'Forbidden' }),
+      { status: 403, headers: { 'Content-Type': 'application/json' } }
+    )
   }
 
   const ip    = getClientIp(req)
@@ -74,13 +116,13 @@ export function middleware(req: NextRequest) {
   const entry = store.get(key)
   if (!entry || now > entry.resetAt) {
     store.set(key, { count: 1, resetAt: now + WINDOW_MS })
-    return addRateLimitHeaders(NextResponse.next(), 1, limit, now + WINDOW_MS)
+    return addCorsAndRateLimitHeaders(NextResponse.next(), 1, limit, now + WINDOW_MS, origin)
   }
 
   entry.count++
   if (entry.count > limit) {
     const retryAfter = Math.ceil((entry.resetAt - now) / 1000)
-    return new NextResponse(
+    const res = new NextResponse(
       JSON.stringify({ error: 'Too many requests', retryAfter }),
       {
         status: 429,
@@ -93,20 +135,26 @@ export function middleware(req: NextRequest) {
         },
       }
     )
+    if (origin && isAllowedOrigin(origin)) res.headers.set('Access-Control-Allow-Origin', origin)
+    return res
   }
 
-  return addRateLimitHeaders(NextResponse.next(), entry.count, limit, entry.resetAt)
+  return addCorsAndRateLimitHeaders(NextResponse.next(), entry.count, limit, entry.resetAt, origin)
 }
 
-function addRateLimitHeaders(
+function addCorsAndRateLimitHeaders(
   res: NextResponse,
   count: number,
   limit: number,
   resetAt: number,
+  origin: string | null,
 ): NextResponse {
   res.headers.set('X-RateLimit-Limit',     String(limit))
   res.headers.set('X-RateLimit-Remaining', String(Math.max(0, limit - count)))
   res.headers.set('X-RateLimit-Reset',     String(Math.floor(resetAt / 1000)))
+  if (origin && isAllowedOrigin(origin)) {
+    res.headers.set('Access-Control-Allow-Origin', origin)
+  }
   return res
 }
 

@@ -27,12 +27,8 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <head>
         {/* Prevent flash of wrong theme — runs before React hydration */}
-        <script dangerouslySetInnerHTML={{ __html: `
-          try {
-            var t = localStorage.getItem('mb_theme');
-            if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
-          } catch(e) {}
-        ` }} />
+        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
+        <script src="/theme-init.js" />
       </head>
       <body className="min-h-screen" style={{ background: 'var(--ink-bg)' }}>
         <Providers>

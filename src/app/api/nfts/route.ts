@@ -4,7 +4,8 @@ import { getMonPrice } from '@/lib/monad'
 export const revalidate = 0
 
 // ─── Security: SSRF protection for metadata fetching ─────────────────────────
-const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fc00:|fd)/
+// Covers IPv4 private ranges, link-local, loopback, and IPv6-mapped IPv4 (::ffff:)
+const PRIVATE_IP_RE = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|::ffff:|fc00:|fd)/
 
 // Fix #7 (MÉDIO): Extended blocklist to include cloud metadata endpoints.
 // A malicious NFT metadata_url pointing to these would allow SSRF attacks
@@ -213,6 +214,6 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'no_api_key', nfts: [], nftValue: 0, total: 0 })
     }
     console.error('[nfts]', err?.message)
-    return NextResponse.json({ error: err?.message ?? 'Failed' }, { status: 500 })
+    return NextResponse.json({ error: 'Failed to fetch NFTs' }, { status: 500 })
   }
 }
