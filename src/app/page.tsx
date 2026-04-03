@@ -411,7 +411,7 @@ export default function LandingPage() {
           <div style={{ textAlign: 'center', marginBottom: '3.5rem' }}>
             <span className="tag" style={{ marginBottom: '1rem', display: 'inline-block' }}>Features</span>
             <h2 className="land-h2">Everything you need to navigate Monad</h2>
-            <p style={{ color: 'var(--land-muted)', marginTop: '0.75rem', maxWidth: '520px', margin: '0.75rem auto 0' }}>
+            <p style={{ color: 'var(--land-muted)', marginTop: '0.75rem', maxWidth: '620px', margin: '0.75rem auto 0' }}>
               From portfolio tracking to yield hunting, all your on-chain activity organized.
             </p>
           </div>
