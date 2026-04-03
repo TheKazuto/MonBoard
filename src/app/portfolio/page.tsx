@@ -286,8 +286,12 @@ export default function PortfolioPage() {
           {/* ── Portfolio History ─────────────────────────────────────────── */}
           <PortfolioHistory />
 
-          {/* ── AdsTerra banner slot ──────────────────────────────────────── */}
-          <AdBanner className="min-h-[120px]" />
+          {/* ── Partner banner ───────────────────────────────────────────── */}
+          <AdBanner
+            className="min-h-[120px]"
+            imageSrc="/banner-portfolio.png"
+            href="https://app.lighter.xyz/?referral=SHINKALABS"
+          />
 
           {/* ── Tokens table ─────────────────────────────────────────────── */}
           <div className="card overflow-hidden">

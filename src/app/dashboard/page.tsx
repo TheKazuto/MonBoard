@@ -321,7 +321,11 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-5 lg:items-stretch">
         <div className="lg:col-span-3 flex flex-col gap-5">
           <WalletSummary />
-          <AdBanner className="flex-1 rounded-xl" />
+          <AdBanner
+            className="flex-1 rounded-xl"
+            imageSrc="/banners-dashboard-1.png"
+            href="https://promote.mexc.com/r/JIBHqKd5hH"
+          />
         </div>
         <div className="lg:col-span-2">
           <RecentActivity />

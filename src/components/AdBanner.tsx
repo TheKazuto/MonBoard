@@ -15,7 +15,13 @@
  *     <img src="/banners/nome-parceiro.png" alt="Parceiro" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 12 }} />
  *   </a>
  */
-export default function AdBanner({ className = '' }: { className?: string }) {
+interface AdBannerProps {
+  className?: string
+  imageSrc?: string
+  href?: string
+}
+
+export default function AdBanner({ className = '', imageSrc, href }: AdBannerProps) {
   return (
     <div
       className={`relative overflow-visible ${className}`}
@@ -37,35 +43,51 @@ export default function AdBanner({ className = '' }: { className?: string }) {
         zIndex: 1,
         userSelect: 'none',
       }}>
-        Ad area
+        Ad
       </span>
 
-      {/* Placeholder estático — substituir pelo banner do parceiro */}
-      <a
-        href="https://docs.google.com/forms/d/e/1FAIpQLSc4HmUzes30tavHHsK_4SHa9V3ksPIrXXkwQcjx1Cn9eZZhgQ/viewform"
-        target="_blank"
-        rel="noopener noreferrer"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          width: '100%',
-          height: '100%',
-          minHeight: 90,
-          border: '1px dashed #e8e0fe',
-          borderRadius: 12,
-          background: 'transparent',
-          textDecoration: 'none',
-          cursor: 'pointer',
-          transition: 'background 0.15s',
-        }}
-        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(131,110,249,0.04)')}
-        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-      >
-        <p style={{ fontSize: 12, color: '#c4b5fd', fontWeight: 500, letterSpacing: '0.02em' }}>
-          Advertise here → Become a partner
-        </p>
-      </a>
+      {imageSrc && href ? (
+        /* Banner de parceiro com imagem */
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer sponsored"
+          style={{ display: 'block', width: '100%', height: '100%', borderRadius: 12, overflow: 'hidden' }}
+        >
+          <img
+            src={imageSrc}
+            alt="Partner banner"
+            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block', borderRadius: 12 }}
+          />
+        </a>
+      ) : (
+        /* Placeholder estático — substituir pelo banner do parceiro */
+        <a
+          href="https://docs.google.com/forms/d/e/1FAIpQLSc4HmUzes30tavHHsK_4SHa9V3ksPIrXXkwQcjx1Cn9eZZhgQ/viewform"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '100%',
+            height: '100%',
+            minHeight: 90,
+            border: '1px dashed #e8e0fe',
+            borderRadius: 12,
+            background: 'transparent',
+            textDecoration: 'none',
+            cursor: 'pointer',
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(131,110,249,0.04)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+        >
+          <p style={{ fontSize: 12, color: '#c4b5fd', fontWeight: 500, letterSpacing: '0.02em' }}>
+            Advertise here → Become a partner
+          </p>
+        </a>
+      )}
     </div>
   )
 }
