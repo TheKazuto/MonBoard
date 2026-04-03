@@ -324,7 +324,7 @@ export default function TransactionsPage() {
         <div className="space-y-4">
 
           {/* Watch Wallets */}
-          <div className="card p-5 relative">
+          <div className="card p-5 relative overflow-hidden min-h-[300px]">
             {/* TODO: implement NFT gating — replace with dynamic check when collection launches */}
             <div className="absolute inset-0 rounded-2xl flex flex-col items-center justify-center z-10 text-center p-6"
               style={{ background: 'var(--premium-overlay-bg)', backdropFilter: 'blur(4px)' }}>
